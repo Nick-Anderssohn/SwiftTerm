@@ -358,6 +358,27 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         guard let drawable, let passDescriptor else {
             markPendingRedraw()
             frameSemaphore.signal()
+            // `pendingRedraw` only gets consumed in the command buffer's
+            // completion handler. We're bailing before submitting one, so
+            // nothing will reschedule — the PTY output is buffered but the
+            // invalidation is silently lost until some unrelated event
+            // (window focus change, resize) reinvalidates the view.
+            // Reschedule on the next runloop turn so the drawable has a
+            // chance to become available. Only when the window is visible —
+            // otherwise AppKit isn't going to draw us and we'd busy-loop.
+            #if os(macOS)
+            if let window = view.window, window.isVisible {
+                DispatchQueue.main.async { [weak view] in
+                    guard let view else { return }
+                    view.setNeedsDisplay(view.bounds)
+                }
+            }
+            #else
+            DispatchQueue.main.async { [weak view] in
+                guard let view else { return }
+                view.setNeedsDisplay()
+            }
+            #endif
             return
         }
 #if canImport(os)
@@ -414,8 +435,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 return
             }
             if self.consumePendingRedraw() {
+                // Direct draw() rather than setNeedsDisplay — same
+                // reasoning as requestMetalDisplay() in
+                // AppleTerminalView.swift: AppKit's display scheduling
+                // is unreliable for rapid invalidations.
                 DispatchQueue.main.async {
-                    view.setNeedsDisplay(view.bounds)
+                    view.draw()
                 }
             }
         }

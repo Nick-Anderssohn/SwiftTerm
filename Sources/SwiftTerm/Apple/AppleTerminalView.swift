@@ -1765,12 +1765,14 @@ extension TerminalView {
             return
         }
 #if canImport(MetalKit) && os(macOS)
-        // Metal path: MTKView (isPaused=true + enableSetNeedsDisplay=true)
-        // already coalesces multiple setNeedsDisplay calls into one draw
-        // per vsync, so the legacy 1/60s CG-flicker throttle just adds
-        // 16–33ms of typing latency and jitter on held keys. Flush on the
-        // next runloop turn instead — rapid chunks still dedupe via
-        // `pendingDisplay`, and MTKView handles frame pacing from there.
+        // Metal path: no throttle. `requestMetalDisplay` calls
+        // `MTKView.draw()` directly, which synchronously invokes the
+        // delegate's draw(in:) and bypasses AppKit's setNeedsDisplay
+        // scheduling entirely — that scheduling is unreliable under
+        // rapid back-to-back invalidations (PTY bursts dropped frames
+        // that only painted after a window focus change re-poked the
+        // display cycle). The renderer's own frameSemaphore caps
+        // in-flight frames, so direct draw() can't flood the GPU.
         if metalView != nil {
             if !pendingDisplay {
                 pendingDisplay = true
@@ -1796,7 +1798,11 @@ extension TerminalView {
         guard let metalView = metalView else {
             return
         }
-        metalView.setNeedsDisplay(metalView.bounds)
+        // Direct synchronous draw. See queuePendingDisplay() for the
+        // rationale — AppKit's setNeedsDisplay → draw loop drops rapid
+        // invalidations on MTKView, causing output to vanish until a
+        // window focus change reinvalidates it.
+        metalView.draw()
     }
 
     func queueMetalDisplay() {
