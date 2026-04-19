@@ -1764,6 +1764,21 @@ extension TerminalView {
         if terminal.synchronizedOutputActive || inSyncSequence {
             return
         }
+#if canImport(MetalKit) && os(macOS)
+        // Metal path: MTKView (isPaused=true + enableSetNeedsDisplay=true)
+        // already coalesces multiple setNeedsDisplay calls into one draw
+        // per vsync, so the legacy 1/60s CG-flicker throttle just adds
+        // 16–33ms of typing latency and jitter on held keys. Flush on the
+        // next runloop turn instead — rapid chunks still dedupe via
+        // `pendingDisplay`, and MTKView handles frame pacing from there.
+        if metalView != nil {
+            if !pendingDisplay {
+                pendingDisplay = true
+                DispatchQueue.main.async(execute: updateDisplay)
+            }
+            return
+        }
+#endif
         // throttle
         if !pendingDisplay {
             let fps60 = 16670000
