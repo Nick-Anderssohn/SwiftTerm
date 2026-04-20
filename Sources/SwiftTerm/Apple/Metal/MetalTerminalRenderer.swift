@@ -373,11 +373,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             // Reschedule on the next runloop turn so the drawable has a
             // chance to become available. Only when the window is visible —
             // otherwise AppKit isn't going to draw us and we'd busy-loop.
+            // macOS uses draw() rather than setNeedsDisplay for the same
+            // reason as requestMetalDisplay() in AppleTerminalView.swift:
+            // AppKit's setNeedsDisplay → display cycle is unreliable under
+            // rapid invalidations (PTY bursts), and that's exactly the
+            // situation that produces transient nil drawables here.
             #if os(macOS)
             if let window = view.window, window.isVisible {
                 DispatchQueue.main.async { [weak view] in
                     guard let view else { return }
-                    view.setNeedsDisplay(view.bounds)
+                    view.draw()
                 }
             }
             #else
