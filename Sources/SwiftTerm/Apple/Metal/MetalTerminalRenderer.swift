@@ -165,7 +165,14 @@ struct CacheSignature: Hashable {
     let cellHeight: Double
     let viewWidth: Double
     let viewHeight: Double
-    let yDisp: Int
+    /// "Anchor" row used by `buildRowDrawData` to derive per-cell pixel
+    /// positions. macOS uses `0` (positions live in yDisp-independent
+    /// buffer-space, with scrolling applied at draw via the
+    /// `scrollOffset` shader uniform — so a scroll never invalidates
+    /// the row cache). iOS continues to anchor to the first visible row
+    /// because UIScrollView is what positions the view, so the cache
+    /// still needs to invalidate when that row changes.
+    let originRow: Int
     let rows: Int
     let cols: Int
     let fontName: String
@@ -446,9 +453,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
         bufferPool.beginFrame()
         let viewport = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
+        let scrollOffset = currentScrollOffsetPx(scale: scale)
 
         if let frame = drawData.frame {
-            drawFrameData(frame, encoder: encoder, viewport: viewport)
+            drawFrameData(frame, encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
         } else {
             let rows = drawData.rows
             drawVertexBuffers(rows: rows,
@@ -457,12 +465,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               pipeline: cellColorPipeline,
                               texture: nil,
                               encoder: encoder,
-                              viewport: viewport)
+                              viewport: viewport,
+                              scrollOffset: scrollOffset)
 
             drawImageRows(rows: rows,
                           imageKey: \.underImageBuffers,
                           encoder: encoder,
-                          viewport: viewport)
+                          viewport: viewport,
+                          scrollOffset: scrollOffset)
 
             drawVertexBuffers(rows: rows,
                               bufferKey: \.glyphGrayBuffer,
@@ -470,7 +480,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               pipeline: cellTextGrayPipeline,
                               texture: grayscaleAtlas.texture,
                               encoder: encoder,
-                              viewport: viewport)
+                              viewport: viewport,
+                              scrollOffset: scrollOffset)
 
             drawVertexBuffers(rows: rows,
                               bufferKey: \.glyphColorBuffer,
@@ -478,7 +489,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               pipeline: cellTextPipeline,
                               texture: colorAtlas.texture,
                               encoder: encoder,
-                              viewport: viewport)
+                              viewport: viewport,
+                              scrollOffset: scrollOffset)
 
             drawVertexBuffers(rows: rows,
                               bufferKey: \.decorationBuffer,
@@ -486,28 +498,33 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               pipeline: cellColorPipeline,
                               texture: nil,
                               encoder: encoder,
-                              viewport: viewport)
+                              viewport: viewport,
+                              scrollOffset: scrollOffset)
 
             drawImageRows(rows: rows,
                           imageKey: \.placeholderImageBuffers,
                           encoder: encoder,
-                          viewport: viewport)
+                          viewport: viewport,
+                          scrollOffset: scrollOffset)
             drawImageRows(rows: rows,
                           imageKey: \.overImageBuffers,
                           encoder: encoder,
-                          viewport: viewport)
+                          viewport: viewport,
+                          scrollOffset: scrollOffset)
             drawImageRows(rows: rows,
                           imageKey: \.otherImageBuffers,
                           encoder: encoder,
-                          viewport: viewport)
+                          viewport: viewport,
+                          scrollOffset: scrollOffset)
         }
 
         if !drawData.cursorColorVertices.isEmpty {
             if let buffer = makeBuffer(drawData.cursorColorVertices) {
                 encoder.setRenderPipelineState(colorPipeline)
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                var viewportVar = viewport
-                encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                bindViewportAndScrollOffset(encoder: encoder,
+                                            viewport: viewport,
+                                            scrollOffset: scrollOffset)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorColorVertices.count)
             }
         }
@@ -516,8 +533,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             if let buffer = makeBuffer(drawData.cursorGlyphVerticesGray) {
                 encoder.setRenderPipelineState(textGrayPipeline)
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                var viewportVar = viewport
-                encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                bindViewportAndScrollOffset(encoder: encoder,
+                                            viewport: viewport,
+                                            scrollOffset: scrollOffset)
                 encoder.setFragmentTexture(grayscaleAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesGray.count)
@@ -528,8 +546,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             if let buffer = makeBuffer(drawData.cursorGlyphVerticesColor) {
                 encoder.setRenderPipelineState(textPipeline)
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                var viewportVar = viewport
-                encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                bindViewportAndScrollOffset(encoder: encoder,
+                                            viewport: viewport,
+                                            scrollOffset: scrollOffset)
                 encoder.setFragmentTexture(colorAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesColor.count)
@@ -594,7 +613,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let viewWidthPx = terminalView.bounds.width * scale
 
         let rowInfo = visibleRowRange(buffer: buffer, cellHeight: cellHeight, terminalView: terminalView)
-        guard let (firstRow, lastRow, visibleDisp) = rowInfo else {
+        guard let (firstRow, lastRow, originRow) = rowInfo else {
 #if DEBUG
             debugRowsRebuilt = 0
             debugRowsCached = 0
@@ -625,7 +644,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                        cellHeight: Double(cellHeight),
                                        viewWidth: Double(terminalView.bounds.width),
                                        viewHeight: Double(terminalView.bounds.height),
-                                       yDisp: visibleDisp,
+                                       originRow: originRow,
                                        rows: buffer.rows,
                                        cols: buffer.cols,
                                        fontName: terminalView.fontSet.normal.fontName,
@@ -682,7 +701,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             if needsRebuild {
                 rowData = buildRowDrawData(row: row,
                                            buffer: buffer,
-                                           yDisp: visibleDisp,
+                                           originRow: originRow,
                                            cellWidth: cellWidth,
                                            cellHeight: cellHeight,
                                            yOffset: yOffset,
@@ -697,7 +716,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             } else if let cached = entry {
                 rowData = cached.data ?? buildRowDrawData(row: row,
                                                           buffer: buffer,
-                                                          yDisp: visibleDisp,
+                                                          originRow: originRow,
                                                           cellWidth: cellWidth,
                                                           cellHeight: cellHeight,
                                                           yOffset: yOffset,
@@ -724,7 +743,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             } else {
                 rowData = buildRowDrawData(row: row,
                                            buffer: buffer,
-                                           yDisp: visibleDisp,
+                                           originRow: originRow,
                                            cellWidth: cellWidth,
                                            cellHeight: cellHeight,
                                            yOffset: yOffset,
@@ -764,7 +783,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                              cellHeight: cellHeight,
                                              lineDescent: lineDescent,
                                              lineLeading: lineLeading,
-                                             yDisp: visibleDisp,
+                                             originRow: originRow,
                                              firstRow: firstRow,
                                              lastRow: lastRow)
 
@@ -817,17 +836,35 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return (firstRow, lastRow, firstRow)
         #else
         let firstRow = buffer.yDisp
-        let lastRow = min(buffer.lines.count - 1, buffer.yDisp + buffer.rows - 1)
+        // Smooth scrolling: when the view is mid-scroll between two
+        // rows, an extra row pokes in at the bottom of the viewport
+        // (the content has shifted up by `subLineScrollOffsetPx` so the
+        // row past the normal last visible row needs to be drawn for
+        // its top sliver). Skip when there's no fractional offset to
+        // keep the cache footprint minimal.
+        let extraTrailingRow = terminalView.subLineScrollOffsetPx > 0 ? 1 : 0
+        let lastRow = min(buffer.lines.count - 1,
+                          buffer.yDisp + buffer.rows - 1 + extraTrailingRow)
         if firstRow > lastRow {
             return nil
         }
-        return (firstRow, lastRow, buffer.yDisp)
+        // macOS path: row positions are computed in yDisp-independent
+        // buffer-space (originRow == 0); the actual scroll position
+        // is applied by the renderer at draw time via `scrollOffset`.
+        return (firstRow, lastRow, 0)
         #endif
     }
 
+    /// Builds the GPU vertex data for one row, in pixel coordinates
+    /// anchored to `originRow`. With `originRow == 0` the positions
+    /// live in yDisp-independent buffer-space (rows below the top of
+    /// the view fall at increasingly negative y); the renderer then
+    /// applies the actual scroll position via the `scrollOffset` shader
+    /// uniform at draw time. With `originRow == firstVisibleRow` (iOS
+    /// path) the positions are already relative to the visible area.
     private func buildRowDrawData(row: Int,
                                   buffer: Buffer,
-                                  yDisp: Int,
+                                  originRow: Int,
                                   cellWidth: CGFloat,
                                   cellHeight: CGFloat,
                                   yOffset: CGFloat,
@@ -866,7 +903,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
         let line = buffer.lines[row]
         let renderMode = line.renderMode
-        let lineOffset = cellHeight * CGFloat(row - yDisp + 1)
+        let lineOffset = cellHeight * CGFloat(row - originRow + 1)
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let rowBase = lineOrigin.y + cellHeight
         let lineInfo = terminalView.buildAttributedString(row: row, line: line, cols: buffer.cols)
@@ -1923,18 +1960,54 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               otherImageBuffers: makeImageDrawBuffers(data.otherImageDraws))
     }
 
+    /// Bind the per-frame viewport (buffer 1) and scrollOffset (buffer
+    /// 2) uniforms used by every vertex shader. Centralized so we can't
+    /// add a new draw call site that forgets to bind one of them — the
+    /// scrollOffset shift is what implements smooth scrolling.
+    private func bindViewportAndScrollOffset(encoder: MTLRenderCommandEncoder,
+                                             viewport: SIMD2<Float>,
+                                             scrollOffset: SIMD2<Float>) {
+        var viewportVar = viewport
+        var scrollOffsetVar = scrollOffset
+        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        encoder.setVertexBytes(&scrollOffsetVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+    }
+
+    /// Compute the scrollOffset uniform (in y-up pixels) that aligns
+    /// the rows generated by `buildRowDrawData` (originRow == 0 on
+    /// macOS) with the actual scroll position. Returns zero on iOS,
+    /// where UIScrollView positions the MTKView itself and the
+    /// renderer leaves originRow == firstVisibleRow.
+    private func currentScrollOffsetPx(scale: CGFloat) -> SIMD2<Float> {
+#if os(macOS)
+        guard let terminalView else {
+            return SIMD2<Float>(0, 0)
+        }
+        let yDisp = terminalView.terminal.displayBuffer.yDisp
+        let cellHeightPx = Double(terminalView.cellDimension.height) * Double(scale)
+        let subOffsetPx = Double(terminalView.subLineScrollOffsetPx) * Double(scale)
+        // Compute in Double to keep sub-point precision over long
+        // scrollback (a million-line buffer × cellHeightPx easily
+        // exceeds Float's exact-integer range), only narrow at the end.
+        let y = Double(yDisp) * cellHeightPx + subOffsetPx
+        return SIMD2<Float>(0, Float(y))
+#else
+        return SIMD2<Float>(0, 0)
+#endif
+    }
+
     private func drawCellBuffer<T>(_ cells: [T],
                                    pipeline: MTLRenderPipelineState,
                                    texture: MTLTexture?,
                                    encoder: MTLRenderCommandEncoder,
-                                   viewport: SIMD2<Float>) {
+                                   viewport: SIMD2<Float>,
+                                   scrollOffset: SIMD2<Float>) {
         guard !cells.isEmpty, let buffer = makeBuffer(cells) else {
             return
         }
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-        var viewportVar = viewport
-        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        bindViewportAndScrollOffset(encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -1942,46 +2015,55 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cells.count * 6)
     }
 
-    private func drawFrameData(_ frame: FrameDrawData, encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>) {
+    private func drawFrameData(_ frame: FrameDrawData,
+                               encoder: MTLRenderCommandEncoder,
+                               viewport: SIMD2<Float>,
+                               scrollOffset: SIMD2<Float>) {
         drawCellBuffer(frame.backgroundCells,
                        pipeline: cellColorPipeline,
                        texture: nil,
                        encoder: encoder,
-                       viewport: viewport)
+                       viewport: viewport,
+                       scrollOffset: scrollOffset)
 
-        drawImageBatches(frame.underImageDraws, encoder: encoder, viewport: viewport)
+        drawImageBatches(frame.underImageDraws, encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
 
         drawCellBuffer(frame.glyphCellsGray,
                        pipeline: cellTextGrayPipeline,
                        texture: grayscaleAtlas.texture,
                        encoder: encoder,
-                       viewport: viewport)
+                       viewport: viewport,
+                       scrollOffset: scrollOffset)
 
         drawCellBuffer(frame.glyphCellsColor,
                        pipeline: cellTextPipeline,
                        texture: colorAtlas.texture,
                        encoder: encoder,
-                       viewport: viewport)
+                       viewport: viewport,
+                       scrollOffset: scrollOffset)
 
         drawCellBuffer(frame.decorationCells,
                        pipeline: cellColorPipeline,
                        texture: nil,
                        encoder: encoder,
-                       viewport: viewport)
+                       viewport: viewport,
+                       scrollOffset: scrollOffset)
 
-        drawImageBatches(frame.placeholderImageDraws, encoder: encoder, viewport: viewport)
-        drawImageBatches(frame.overImageDraws, encoder: encoder, viewport: viewport)
-        drawImageBatches(frame.otherImageDraws, encoder: encoder, viewport: viewport)
+        drawImageBatches(frame.placeholderImageDraws, encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
+        drawImageBatches(frame.overImageDraws, encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
+        drawImageBatches(frame.otherImageDraws, encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
     }
 
-    private func drawImageBatches(_ draws: [ImageDraw], encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>) {
+    private func drawImageBatches(_ draws: [ImageDraw],
+                                  encoder: MTLRenderCommandEncoder,
+                                  viewport: SIMD2<Float>,
+                                  scrollOffset: SIMD2<Float>) {
         guard !draws.isEmpty else {
             return
         }
         encoder.setRenderPipelineState(textPipeline)
         encoder.setFragmentSamplerState(sampler, index: 0)
-        var viewportVar = viewport
-        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        bindViewportAndScrollOffset(encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
         for draw in draws {
             guard let buffer = makeBuffer(draw.vertices) else {
                 continue
@@ -1998,7 +2080,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                    pipeline: MTLRenderPipelineState,
                                    texture: MTLTexture?,
                                    encoder: MTLRenderCommandEncoder,
-                                   viewport: SIMD2<Float>) {
+                                   viewport: SIMD2<Float>,
+                                   scrollOffset: SIMD2<Float>) {
         var hasAny = false
         for row in rows {
             if row[keyPath: bufferKey] != nil {
@@ -2010,8 +2093,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return
         }
         encoder.setRenderPipelineState(pipeline)
-        var viewportVar = viewport
-        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        bindViewportAndScrollOffset(encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -2032,7 +2114,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private func drawImageRows(rows: [RowDrawBuffers],
                                imageKey: KeyPath<RowDrawBuffers, [ImageDrawBuffer]>,
                                encoder: MTLRenderCommandEncoder,
-                               viewport: SIMD2<Float>) {
+                               viewport: SIMD2<Float>,
+                               scrollOffset: SIMD2<Float>) {
         var hasAny = false
         for row in rows {
             if !row[keyPath: imageKey].isEmpty {
@@ -2045,8 +2128,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
         encoder.setRenderPipelineState(textPipeline)
         encoder.setFragmentSamplerState(sampler, index: 0)
-        var viewportVar = viewport
-        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        bindViewportAndScrollOffset(encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
         for row in rows {
             for draw in row[keyPath: imageKey] {
                 encoder.setVertexBuffer(draw.buffer, offset: 0, index: 0)
@@ -2061,7 +2143,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                      cellHeight: CGFloat,
                                      lineDescent: CGFloat,
                                      lineLeading: CGFloat,
-                                     yDisp: Int,
+                                     originRow: Int,
                                      firstRow: Int,
                                      lastRow: Int) -> (colorVertices: [ColorVertex],
                                                        glyphVerticesGray: [GlyphVertex],
@@ -2084,7 +2166,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if isBlinkStyle(cursorStyle) && !cursorBlinkOn {
             return ([], [], [])
         }
-        let lineOffset = cellHeight * CGFloat(cursorRow - yDisp + 1)
+        let lineOffset = cellHeight * CGFloat(cursorRow - originRow + 1)
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let lineOriginPx = CGPoint(x: lineOrigin.x * scale, y: lineOrigin.y * scale)
         let cellWidthPx = cellWidth * scale

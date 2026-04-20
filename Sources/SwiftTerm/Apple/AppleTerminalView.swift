@@ -1978,6 +1978,87 @@ extension TerminalView {
         let newPosition = max (0, min (displayBuffer.yDisp + lines, displayBuffer.lines.count - displayBuffer.rows))
         scrollTo (row: newPosition)
     }
+
+    /// Scrolls the visible window by `deltaPoints` (in points). Sign
+    /// matches `NSEvent.scrollingDeltaY`: positive reveals earlier
+    /// content (scroll up — decrease yDisp), negative reveals later
+    /// content (scroll down). Sub-line deltas accumulate into
+    /// `subLineScrollOffsetPx` for pixel-precise pan when smooth
+    /// scrolling is enabled and the Metal renderer is in use; outside
+    /// that path the delta is rounded to whole lines and dispatched
+    /// through `scrollUp`/`scrollDown`. No-op on the alternate buffer
+    /// (TUIs there own the scroll model) and when there's no scrollback.
+    public func scroll(byPoints deltaPoints: CGFloat)
+    {
+        let displayBuffer = terminal.displayBuffer
+        if terminal.isDisplayBufferAlternate || !displayBuffer.hasScrollback {
+            return
+        }
+        let cellHeight = cellDimension.height
+        guard cellHeight > 0 else { return }
+
+#if os(macOS)
+        let smoothPath = smoothScrollingEnabled && isUsingMetalRenderer
+#else
+        let smoothPath = false
+#endif
+
+        if !smoothPath {
+            // Coarse path: round to whole lines so each call still has
+            // an effect. Without sub-line accumulation a pure trackpad
+            // would emit many sub-cellHeight events that all round to
+            // zero — fall back to the old velocity-rounded behavior by
+            // letting the caller decide line counts (this branch is
+            // mainly hit when the renderer is CG, which never carried
+            // smooth scrolling anyway).
+            let lines = Int((deltaPoints / cellHeight).rounded(.toNearestOrEven))
+            if lines > 0 {
+                scrollUp(lines: lines)
+            } else if lines < 0 {
+                scrollDown(lines: -lines)
+            }
+            return
+        }
+
+#if os(macOS)
+        // Total scroll position in points = yDisp * cellHeight + subOffset.
+        // Positive deltaPoints decreases the total (scroll toward top).
+        let yDisp = displayBuffer.yDisp
+        let maxYDisp = max(0, displayBuffer.lines.count - displayBuffer.rows)
+        let currentTotal = CGFloat(yDisp) * cellHeight + subLineScrollOffsetPx
+        let newTotal = currentTotal - deltaPoints
+        // Decompose newTotal into integer line + sub-line remainder in [0, cellHeight).
+        let rawLine = (newTotal / cellHeight).rounded(.down)
+        var newYDisp = Int(rawLine)
+        var newSubOffset = newTotal - CGFloat(newYDisp) * cellHeight
+        // Clamp to valid scroll range. At either boundary the sub-line
+        // offset must collapse to 0 — rendering past the last buffer
+        // line would expose unbuilt rows.
+        if newYDisp < 0 {
+            newYDisp = 0
+            newSubOffset = 0
+        } else if newYDisp >= maxYDisp {
+            newYDisp = maxYDisp
+            newSubOffset = 0
+        }
+
+        let yDispChanged = newYDisp != yDisp
+        let subOffsetChanged = newSubOffset != subLineScrollOffsetPx
+        guard yDispChanged || subOffsetChanged else { return }
+
+        subLineScrollOffsetPx = newSubOffset
+        if yDispChanged {
+            // scrollTo handles delegate notifications and triggers a
+            // redraw via setNeedsDisplay; the row cache survives the
+            // yDisp tick because the cache key now drops yDisp.
+            scrollTo(row: newYDisp)
+        } else {
+            // Sub-line-only change: no row content changed, just need
+            // to repaint with a new scrollOffset uniform.
+            requestMetalDisplay()
+        }
+#endif
+    }
       
     func feedPrepare()
     {

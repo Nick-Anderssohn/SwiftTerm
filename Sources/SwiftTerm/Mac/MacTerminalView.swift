@@ -133,6 +133,22 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var useMetalRenderer = false
     var metalDirtyRange: ClosedRange<Int>?
     var pendingMetalDisplay: Bool = false
+
+    /// Sub-line vertical scroll offset in points, in `[0, cellHeight)`.
+    /// Together with `terminal.displayBuffer.yDisp` this yields the
+    /// total scroll position. Always `0` unless smooth scrolling is
+    /// enabled and the Metal renderer is in use; line-precise paths
+    /// (CG renderer, mouse wheel without precise deltas) keep this at
+    /// zero. The Metal renderer reads this and shifts the view content
+    /// up by this many points via the `scrollOffset` shader uniform.
+    public internal(set) var subLineScrollOffsetPx: CGFloat = 0
+
+    /// Opt-in for sub-pixel scrolling on the Metal path. When `false`,
+    /// `scroll(byPoints:)` quantizes its delta into whole-line scroll
+    /// commands. Defaults to `false` so the SwiftTerm-default behavior
+    /// (line-snap scrolling) is unchanged for callers that don't opt
+    /// in. Nice flips this on through `Tweaks.smoothScrolling`.
+    public var smoothScrollingEnabled: Bool = false
     /// Controls how the Metal renderer builds GPU buffers each frame.
     ///
     /// The default is ``MetalBufferingMode/perRowPersistent``, which caches
@@ -2030,7 +2046,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
         let displayBuffer = terminal.displayBuffer
         let col = Int (point.x / cellDimension.width)
-        let row = Int ((frame.height-point.y) / cellDimension.height)
+        // Smooth scrolling: content is visually shifted up by
+        // `subLineScrollOffsetPx`, so a click at point.y corresponds
+        // to content that was originally `subLineScrollOffsetPx` lower
+        // in the un-shifted coordinate system. Add it back before
+        // dividing into rows so click hit-tests still land on the
+        // visually-clicked cell. Zero on the line-snap path.
+        let row = Int ((frame.height - point.y + subLineScrollOffsetPx) / cellDimension.height)
         let colValue = min (max (0, col), terminal.cols-1)
         let bufferRow = row + displayBuffer.yDisp
         let maxRow = max (0, displayBuffer.lines.count - 1)
@@ -2272,7 +2294,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     public override func scrollWheel(with event: NSEvent) {
-        if event.deltaY == 0 {
+        if event.deltaY == 0 && event.scrollingDeltaY == 0 {
             return
         }
         if allowMouseReporting && terminal.mouseMode != .off {
@@ -2295,6 +2317,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                     sendKeyDown()
                 }
             }
+        } else if smoothScrollingEnabled
+                    && isUsingMetalRenderer
+                    && event.hasPreciseScrollingDeltas {
+            // Trackpad / Magic Mouse: pixel-precise pan via the Metal
+            // scrollOffset uniform. `scrollingDeltaY` is in points and
+            // already in macOS' "positive = scroll-up = reveal earlier"
+            // sense, matching `scroll(byPoints:)`. Mouse wheel events
+            // and CG-renderer panes fall through to the line-quantized
+            // path below.
+            scroll(byPoints: event.scrollingDeltaY)
         } else {
             let velocity = calcScrollingVelocity(delta: Int(abs(event.deltaY)))
             if event.deltaY > 0 {

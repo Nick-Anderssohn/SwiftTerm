@@ -203,6 +203,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var pendingMetalDisplay: Bool = false
     private var useMetalRenderer = false
     var metalDirtyRange: ClosedRange<Int>?
+    /// iOS stub: smooth scrolling on iOS is handled by UIScrollView
+    /// (the renderer reads this through `subLineScrollOffsetPx`). Kept
+    /// as a `let 0` so the cross-platform renderer can reference it
+    /// without `#if os(macOS)` branching at every read site.
+    let subLineScrollOffsetPx: CGFloat = 0
 
     /// Whether the terminal view is currently using the Metal GPU renderer.
     ///
