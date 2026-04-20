@@ -39,9 +39,23 @@ extension UIColor {
                         alpha: fAlpha)
     }
 
+    /// Euclidean distance between two colors in sRGB 0..255 space. Used
+    /// by the subtle-background policy to decide when a cell tint is
+    /// close enough to the native background to flatten.
+    func srgbDistance (to other: UIColor) -> CGFloat {
+        var lr: CGFloat = 0, lg: CGFloat = 0, lb: CGFloat = 0, la: CGFloat = 1
+        self.getRed(&lr, green: &lg, blue: &lb, alpha: &la)
+        var rr: CGFloat = 0, rg: CGFloat = 0, rb: CGFloat = 0, ra: CGFloat = 1
+        other.getRed(&rr, green: &rg, blue: &rb, alpha: &ra)
+        let dr = (lr - rr) * 255
+        let dg = (lg - rg) * 255
+        let db = (lb - rb) * 255
+        return (dr * dr + dg * dg + db * db).squareRoot()
+    }
+
     static func make (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) -> TTColor
     {
-        
+
         return UIColor(red: red,
                        green: green,
                        blue: blue,

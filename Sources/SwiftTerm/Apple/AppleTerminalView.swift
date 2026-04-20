@@ -509,7 +509,23 @@ extension TerminalView {
         }
         
         var fgColor = mapColor (color: fg, isFg: true, isBold: isBold, useBrightColors: useBrightColors)
-        let bgColor = mapColor (color: bg, isFg: false, isBold: false)
+        var bgColor = mapColor (color: bg, isFg: false, isBold: false)
+        // Subtle-background policy: CLIs like Claude Code emit a
+        // background color slightly offset from the default to tint
+        // prompt blocks. When the host opts in, snap those tints to the
+        // native background (flatten) or to a chosen override color.
+        // Gated on `bg != .defaultColor` so genuine default-bg cells —
+        // which already render invisibly — skip the distance math.
+        if bg != .defaultColor && bg != .defaultInvertedColor {
+            if subtleBackgroundFlattening {
+                if bgColor.srgbDistance(to: nativeBackgroundColor) < subtleBackgroundThreshold {
+                    bgColor = nativeBackgroundColor
+                }
+            } else if let override = subtleBackgroundOverride,
+                      bgColor.srgbDistance(to: nativeBackgroundColor) < subtleBackgroundThreshold {
+                bgColor = override
+            }
+        }
         // Apply dim/faint attribute (SGR 2)
         if flags.contains (.dim) {
             fgColor = fgColor.dimmedColor (towards: bgColor)

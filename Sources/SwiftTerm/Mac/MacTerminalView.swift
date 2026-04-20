@@ -471,6 +471,40 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
     public var useBrightColors: Bool = true
 
+    /// When true, any cell whose background color lands within
+    /// ``subtleBackgroundThreshold`` of ``nativeBackgroundColor`` is
+    /// rendered against the native background, i.e. the subtle tint is
+    /// flattened away. Lets the host hide CLI-emitted prompt-block
+    /// highlights (e.g. Claude Code's user-input bars) without touching
+    /// stark ANSI backgrounds used by vim/tmux/fzf/etc.
+    public var subtleBackgroundFlattening: Bool = false {
+        didSet {
+            guard oldValue != subtleBackgroundFlattening else { return }
+            colorsChanged()
+        }
+    }
+
+    /// When ``subtleBackgroundFlattening`` is `false` and this is non-nil,
+    /// subtle cell backgrounds are remapped to this color instead of the
+    /// native background. Use to re-tint CLI-emitted prompt bars without
+    /// disabling them. No effect when ``subtleBackgroundFlattening`` is `true`.
+    public var subtleBackgroundOverride: NSColor? = nil {
+        didSet {
+            colorsChanged()
+        }
+    }
+
+    /// sRGB Euclidean-distance threshold (0..~441) under which a cell
+    /// background is considered "subtle" relative to the native
+    /// background. 40 catches typical prompt-block tints (~15-20 units
+    /// off default) while preserving editor/TUI backgrounds (~60+).
+    public var subtleBackgroundThreshold: CGFloat = 40.0 {
+        didSet {
+            guard oldValue != subtleBackgroundThreshold else { return }
+            colorsChanged()
+        }
+    }
+
     /// When true, block element (U+2580-U+259F) and box drawing (U+2500-U+257F) characters use custom rendering.
     public var customBlockGlyphs: Bool = true {
         didSet {

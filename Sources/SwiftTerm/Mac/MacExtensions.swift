@@ -49,6 +49,26 @@ extension NSColor {
         return NSColor(cgColor: cg)!
     }
 
+    /// Euclidean distance between two colors in sRGB 0..255 space. Used
+    /// by the subtle-background policy to decide when a cell tint is
+    /// close enough to the native background to flatten. Returns
+    /// `.greatestFiniteMagnitude` if either color can't be converted to
+    /// sRGB (e.g. pattern or catalog colors) so those never trigger.
+    func srgbDistance (to other: NSColor) -> CGFloat {
+        guard let lhs = self.usingColorSpace(.sRGB),
+              let rhs = other.usingColorSpace(.sRGB) else {
+            return .greatestFiniteMagnitude
+        }
+        var lr: CGFloat = 0, lg: CGFloat = 0, lb: CGFloat = 0, la: CGFloat = 1
+        lhs.getRed(&lr, green: &lg, blue: &lb, alpha: &la)
+        var rr: CGFloat = 0, rg: CGFloat = 0, rb: CGFloat = 0, ra: CGFloat = 1
+        rhs.getRed(&rr, green: &rg, blue: &rb, alpha: &ra)
+        let dr = (lr - rr) * 255
+        let dg = (lg - rg) * 255
+        let db = (lb - rb) * 255
+        return (dr * dr + dg * dg + db * db).squareRoot()
+    }
+
     static func make (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) -> NSColor
     {
         let cg = CGColor(colorSpace: srgbColorSpace, components: [red, green, blue, alpha])!
