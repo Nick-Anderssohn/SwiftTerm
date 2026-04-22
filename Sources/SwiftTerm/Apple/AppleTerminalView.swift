@@ -1906,13 +1906,12 @@ extension TerminalView {
     
     public func scroll (toPosition: Double)
     {
-        userScrolling = true
         let displayBuffer = terminal.displayBuffer
         let oldPosition = displayBuffer.yDisp
-        
+
         let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
         var newScrollPosition = Int (Double (maxScrollback) * toPosition)
-        
+
         if newScrollPosition < 0 {
             newScrollPosition = 0
         }
@@ -1923,15 +1922,19 @@ extension TerminalView {
         if newScrollPosition != oldPosition {
             scrollTo(row: newScrollPosition)
         }
-        userScrolling = false
     }
-    
+
     public func scrollTo (row: Int, notifyAccessibility: Bool = true)
     {
         let displayBuffer = terminal.displayBuffer
         if row != displayBuffer.yDisp {
             terminal.setViewYDisp (row)
-            
+            // Treat any off-bottom viewport as "user is scrolling" so the
+            // terminal emulator's scroll() path leaves yDisp alone when new
+            // output arrives. Returning to yBase clears the flag and
+            // restores the classic sticky-bottom behavior.
+            terminal.userScrolling = row < displayBuffer.yBase
+
             // tell the terminal we want to refresh all the rows
             terminal.refresh (startRow: 0, endRow: terminal.rows)
             

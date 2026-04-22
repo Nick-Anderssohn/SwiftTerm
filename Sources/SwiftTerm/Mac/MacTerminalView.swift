@@ -671,8 +671,6 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         scroller.doubleValue = scrollPosition
         scroller.knobProportion = scrollThumbsize
     }
-    
-    var userScrolling = false
 
     override open func viewWillDraw() {
         
