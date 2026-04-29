@@ -86,6 +86,27 @@ public class LocalProcess {
     
     var io: DispatchIO?
 
+    /// Closure-shaped pseudo-terminal forking primitive. The default
+    /// forwards to `PseudoTerminalHelpers.fork(andExec:...)`. Tests
+    /// inject a stub returning nil to exercise the spawn-failure
+    /// surface (`processTerminated(exitCode: nil)`) without forking
+    /// a real child. `internal` so SwiftTermTests can mutate it via
+    /// `@testable import SwiftTerm`.
+    typealias ForkPty = (
+        _ executable: String,
+        _ args: [String],
+        _ env: [String],
+        _ currentDirectory: String?,
+        _ desiredWindowSize: inout winsize
+    ) -> (pid: pid_t, masterFd: Int32)?
+
+    var forkpty: ForkPty = { exec, args, env, cwd, size in
+        PseudoTerminalHelpers.fork(
+            andExec: exec, args: args, env: env,
+            currentDirectory: cwd, desiredWindowSize: &size
+        )
+    }
+
     private let usesMainQueue: Bool
     private let pendingChunkFlushThreshold = 32
     private let pendingTimeSliceNs: UInt64 = 4_000_000
@@ -440,7 +461,7 @@ public class LocalProcess {
             env = environment!
         }
 
-        if let (shellPid, childfd) = PseudoTerminalHelpers.fork(andExec: executable, args: shellArgs, env: env, currentDirectory: currentDirectory, desiredWindowSize: &size) {
+        if let (shellPid, childfd) = forkpty(executable, shellArgs, env, currentDirectory, &size) {
 #if os(macOS)
             childMonitor = DispatchSource.makeProcessSource(identifier: shellPid, eventMask: .exit, queue: dispatchQueue)
             if let cm = childMonitor {
@@ -469,19 +490,17 @@ public class LocalProcess {
             io.setLimit(highWater: readSize)
             io.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
         } else {
-            // forkpty pre-flight failed. Common causes: pty table
-            // exhaustion (`kern.tty.ptmx_max` on macOS), per-user
-            // process limit, file-descriptor limit, or out of memory
-            // in the C-string allocations. Surface as a normal
-            // termination with `exitCode: nil` so the delegate can
-            // react instead of waiting forever for output that will
-            // never arrive (the previous behaviour was a silent
-            // return that left the caller with no signal at all).
-            // Async-dispatched on `dispatchQueue` to match the
-            // natural-exit path — a synchronous fire from inside
-            // `startProcess` would re-enter the caller's stack mid-
-            // setup. `running` stays false so later send/terminate
-            // calls don't touch the missing fd.
+            // forkpty failed. Surface via the existing nil-exitCode
+            // semantic on `LocalProcessDelegate.processTerminated`
+            // ("error caused during the IO reading/writing") so the
+            // delegate can react instead of waiting forever for
+            // output that will never arrive. Async-dispatched on
+            // `dispatchQueue` to match the natural-exit path — a
+            // sync fire from inside `startProcess` would re-enter
+            // the caller's stack mid-setup. `running` stays false
+            // so later send/terminate calls don't touch the missing
+            // fd. Errno diagnostics are logged at the failure site
+            // in `PseudoTerminalHelpers.fork`.
             dispatchQueue.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.processTerminated(self, exitCode: nil)
