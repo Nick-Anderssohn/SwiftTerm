@@ -93,9 +93,18 @@ public class PseudoTerminalHelpers {
         }
 
         var master: Int32 = 0
-        
+
         let pid = forkpty(&master, nil, nil, &desiredWindowSize)
         if pid < 0 {
+            // Capture errno before the deferred `free` calls run — they
+            // shouldn't touch errno but POSIX doesn't guarantee it, and
+            // this value is the only diagnostic the caller has. Common
+            // failures: EAGAIN (per-user process limit), EMFILE/ENFILE
+            // (file-descriptor exhaustion), ENOMEM, EIO (no free pty
+            // slot — `kern.tty.ptmx_max` on macOS, capped at 511).
+            let savedErrno = errno
+            let message = String(cString: strerror(savedErrno))
+            print("SwiftTerm: forkpty failed: \(message) (errno=\(savedErrno))")
             return nil
         }
         if pid == 0 {
