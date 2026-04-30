@@ -420,6 +420,12 @@ open class Terminal {
     var gcharset: Int = 0
     var reverseWraparound: Bool = false
     weak var tdel: TerminalDelegate?
+
+    /// The selection service registered against this terminal. The
+    /// view layer constructs `SelectionService(terminal:)` and the
+    /// init registers itself here. Held weakly to avoid retaining
+    /// the view's selection state.
+    weak var selection: SelectionService?
     private var curAttr: Attribute = CharData.defaultAttr
     private var charToIndexMap: [Character:Int32] = [:]
     private var indexToCharMap: [Int32: Character] = [:]
@@ -688,6 +694,8 @@ open class Terminal {
         
         normalBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
         altBuffer.scroll = { [weak self] wrapped in self?.scroll(isWrapped: wrapped) }
+        normalBuffer.linesEvicted = { [weak self] count in self?.selection?.didEvictTopLines(count: count) }
+        altBuffer.linesEvicted = { [weak self] count in self?.selection?.didEvictTopLines(count: count) }
 
         setupTabStops()
 
@@ -778,6 +786,7 @@ open class Terminal {
     public func resetNormalBuffer() {
         normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback)
         normalBuffer.scroll = scroll(isWrapped:)
+        normalBuffer.linesEvicted = { [weak self] count in self?.selection?.didEvictTopLines(count: count) }
 
         normalBuffer.fillViewportRows()
         normalBuffer.setupTabStops(tabStopWidth: tabStopWidth)

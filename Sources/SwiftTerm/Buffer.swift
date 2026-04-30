@@ -248,6 +248,9 @@ public final class Buffer {
                 self?._linesWithImagesCount += 1
             }
         }
+        _lines.onLinesEvicted = { [weak self] count in
+            self?.linesEvicted(count)
+        }
     }
     
     private var curAttr: Attribute = Attribute.empty
@@ -256,6 +259,14 @@ public final class Buffer {
     private var wraparound: Bool = false
     var scroll: (_ isWrapped: Bool)->() = { x in
         fatalError("This should be set after creating a buffer")
+    }
+
+    /// Invoked whenever lines disappear from logical index 0 (e.g.
+    /// `CircularBufferLineList.recycle` or the `shiftElements`
+    /// overflow loop). Terminal hooks this to translate any active
+    /// selection so its row indices stay pinned to the same content.
+    var linesEvicted: (_ count: Int)->() = { _ in
+        // No-op default; Terminal sets this after creating a buffer.
     }
     
     func setInsertMode(_ value: Bool) {

@@ -24,6 +24,7 @@ class SelectionService: CustomDebugStringConvertible {
         end = Position(col: 0, row: 0)
         pivot = Position(col: 0, row: 0)
         hasSelectionRange = false
+        terminal.selection = self
     }
     
     /**
@@ -531,6 +532,32 @@ class SelectionService: CustomDebugStringConvertible {
             active = false
             selectionMode = .character
         }
+    }
+
+    /// Translates the selection's row indices back by `count` after
+    /// that many lines have been evicted from the top of the
+    /// scrollback. Keeps the highlight pinned to the same content.
+    /// If the selection falls entirely above row 0 the selection is
+    /// cleared; if only one endpoint is off-screen it is clamped to
+    /// row 0 so the visible portion stays selected.
+    func didEvictTopLines (count: Int) {
+        guard active, count > 0 else { return }
+        let newStartRow = start.row - count
+        let newEndRow = end.row - count
+        if newStartRow < 0 && newEndRow < 0 {
+            active = false
+            return
+        }
+        start = Position(col: newStartRow < 0 ? 0 : start.col,
+                         row: max(0, newStartRow))
+        end = Position(col: newEndRow < 0 ? 0 : end.col,
+                       row: max(0, newEndRow))
+        if let p = pivot {
+            let newPivotRow = p.row - count
+            pivot = Position(col: newPivotRow < 0 ? 0 : p.col,
+                             row: max(0, newPivotRow))
+        }
+        setActiveAndNotify()
     }
     
     public func getSelectedText () -> String {

@@ -274,6 +274,12 @@ internal class CircularBufferLineList {
     /// Called when a line is pushed, with true if the line has images
     var onLinePushed: ((_ hasImages: Bool) -> Void)? = nil
 
+    /// Called after one or more lines have been evicted from the
+    /// front of the buffer (logical index 0). Fires from `recycle()`
+    /// and from the `shiftElements` overflow loop. Carries the
+    /// number of lines that just disappeared from the front.
+    var onLinesEvicted: ((_ count: Int) -> Void)? = nil
+
     public init (maxLength: Int)
     {
         array = Array.init(repeating: nil, count: Int(maxLength))
@@ -332,6 +338,7 @@ internal class CircularBufferLineList {
         let hadImages = array[index]?.images != nil
         array[index]?.clear(with: clearAttribute)
         onLineRecycled?(hadImages)
+        onLinesEvicted?(1)
         //array [index] = makeEmpty! (-1)
     }
 
@@ -413,10 +420,14 @@ internal class CircularBufferLineList {
             let expandListBy = start + count + offset - self.count
             if expandListBy > 0 {
                 self._count += expandListBy
+                var evicted = 0
                 while self._count > maxLength {
                     self._count -= 1
                     startIndex += 1
-                    // trimmed callback invoke
+                    evicted += 1
+                }
+                if evicted > 0 {
+                    onLinesEvicted?(evicted)
                 }
             }
         } else {
