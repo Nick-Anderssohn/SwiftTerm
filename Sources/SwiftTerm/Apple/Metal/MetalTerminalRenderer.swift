@@ -215,7 +215,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var atlasResetHandled = false
     private var cursorBlinkTimer: Timer?
     private var cursorBlinkOn = true
-    private let frameSemaphore = DispatchSemaphore(value: 1)
+    private let frameSemaphore = DispatchSemaphore(value: 3)
     private var pendingRedraw = false
     private let redrawLock = NSLock()
 #if DEBUG
@@ -320,10 +320,18 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             }
         }
 #endif
+        // Mark before wait. The race we're closing: if `wait` fails and
+        // we're then preempted before calling `markPendingRedraw`, an
+        // in-flight buffer's completion handler can run consume in
+        // between, read pendingRedraw=false, skip the reschedule, and
+        // strand the redraw. Setting the flag first means the consumer
+        // either sees true (and reschedules) or we acquire the slot and
+        // clear it ourselves below.
+        markPendingRedraw()
         if frameSemaphore.wait(timeout: .now()) != .success {
-            markPendingRedraw()
             return
         }
+        _ = consumePendingRedraw()
         guard let terminalView = terminalView else {
             frameSemaphore.signal()
             return
@@ -379,11 +387,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             // rapid invalidations (PTY bursts), and that's exactly the
             // situation that produces transient nil drawables here.
             #if os(macOS)
-            if let window = view.window, window.isVisible {
-                DispatchQueue.main.async { [weak view] in
-                    guard let view else { return }
-                    view.draw()
-                }
+            // Reschedule unconditionally. Previously gated on
+            // window.isVisible, but that left pendingRedraw set with no
+            // consumer when the window was hidden — if it became
+            // visible later via a path that didn't itself trigger a
+            // draw, the redraw was stranded. The async draw is harmless
+            // when the view isn't drawable: it just re-enters this same
+            // nil-drawable path and re-defers.
+            DispatchQueue.main.async { [weak view] in
+                guard let view else { return }
+                view.draw()
             }
             #else
             DispatchQueue.main.async { [weak view] in
