@@ -182,11 +182,35 @@ final class GlyphAtlas {
         nextY = 0
         rowHeight = 0
         data = Array(repeating: UInt8(0), count: size * size * bytesPerPixel)
-        data.withUnsafeBytes { raw in
-            texture.replace(region: MTLRegionMake2D(0, 0, size, size),
-                            mipmapLevel: 0,
-                            withBytes: raw.baseAddress!,
-                            bytesPerRow: size * bytesPerPixel)
+        // Allocate a fresh texture instead of clearing the existing one
+        // in place. With frameSemaphore=3, up to two prior command
+        // buffers can still be GPU-sampling the current atlas texture
+        // when reset() runs; per Metal's API contract, modifying a
+        // texture that's referenced by an in-flight command buffer is
+        // undefined and on Apple Silicon `.shared` storage manifests as
+        // a few frames of glyph corruption right after an atlas
+        // overflow. Allocating a new texture sidesteps this: prior
+        // frames keep their reference to the old texture (Metal retains
+        // bound resources for the command buffer's lifetime), the old
+        // one is released via ARC after those frames complete, and new
+        // glyphs are written into the fresh texture going forward.
+        // This mirrors what grow() already does. We don't need to zero
+        // the new texture's contents — reset() callers in the renderer
+        // immediately invalidate glyphCache/rowCache/customGlyphCache,
+        // so nothing samples the atlas again until subsequent write()
+        // calls have populated valid pixels.
+        if let fresh = GlyphAtlas.makeTexture(device: device, size: size, format: format) {
+            texture = fresh
+        } else {
+            // Allocation failed (memory pressure?). Fall back to the
+            // in-place clear; the race window is unlikely in practice
+            // and the alternative is leaving a stale-state atlas.
+            data.withUnsafeBytes { raw in
+                texture.replace(region: MTLRegionMake2D(0, 0, size, size),
+                                mipmapLevel: 0,
+                                withBytes: raw.baseAddress!,
+                                bytesPerRow: size * bytesPerPixel)
+            }
         }
     }
 
