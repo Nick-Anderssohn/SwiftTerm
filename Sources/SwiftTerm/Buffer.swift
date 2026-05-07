@@ -1007,32 +1007,12 @@ public final class Buffer {
 
         // Go backwards as many lines may be trimmed and this will avoid considering them
         var y = lines.count-1
-        let cursorAbsolute = yBase + self.y
         while y >= 0 {
             defer { y -= 1 }
             // Check whether this line is a problem or not, if not skip it
             var nextLine = lines [y]
             let lineLength = nextLine.getTrimmedLength ()
             if !nextLine.isWrapped && lineLength <= newCols {
-                continue
-            }
-
-            // Don't introduce a NEW wrap on an unwrapped line that
-            // sits above the cursor. That used to convert e.g. a 102-
-            // char prompt at row 0 into a 2-row wrapped block when the
-            // user dragged from 102 to 101 cols, which `viewportAdjustments`
-            // below would compensate for by bumping `self.y` down. The
-            // shell, on its SIGWINCH redraw, then issues `\r\e[J` from
-            // the bumped row, so the wrapped tail of the old prompt
-            // stays visible above and a new prompt prints below — the
-            // sidebar-resize duplication bug. Falling through to the
-            // post-reflow `lines[i].resize(newCols)` step in
-            // `Buffer.resize` truncates the over-wide content instead,
-            // which keeps the cursor on its row and stays in sync with
-            // what the shell is about to redraw. Already-wrapped blocks
-            // (continuations) and lines at-or-below the cursor still
-            // get re-narrowed normally — those don't desync the shell.
-            if !nextLine.isWrapped && y < cursorAbsolute {
                 continue
             }
 
