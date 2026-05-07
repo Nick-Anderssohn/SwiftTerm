@@ -2410,6 +2410,31 @@ open class Terminal {
         var j: Int
         switch p {
         case 0:
+            // Sidebar-resize stale-prompt mitigation: when the cursor sits at
+            // column 0 of an autowrapped row, the wrap originated above. The
+            // host program — almost always a shell about to redraw its prompt
+            // with `\r\r\e[J` after a SIGWINCH — meant "clear from where my
+            // prompt actually starts," not "clear from the wrapped tail down."
+            // Walk back through the wrapped chain so the erase covers the
+            // whole stale block, and move the cursor to the chain's origin so
+            // the upcoming prompt redraw lands on the right row.
+            //
+            // Without this, a fast sidebar drag produces:
+            //   1. shell sends a redraw at the OLD (wider) col count;
+            //   2. SwiftTerm processes it at the NEW (narrower) col count, so
+            //      the right-anchored tail wraps onto the next row;
+            //   3. shell's next redraw at the correct col count erases below
+            //      its current cursor and writes the prompt — leaving the
+            //      stale prompt visible above. The visual: prompts stacking.
+            if buffer.x == 0 {
+                while buffer.y > 0 && buffer.lines[buffer.y + buffer.yBase].isWrapped {
+                    // Clear the wrapped tail row outright: it's about to be
+                    // covered by the redraw, and leaving cells around would
+                    // require getTrimmedLength to lie about line length.
+                    resetBufferLine(y: buffer.y)
+                    buffer.y -= 1
+                }
+            }
             j = buffer.y
             updateRange (j)
             eraseInBufferLine (y: j, start: buffer.x, end: cols, clearWrap: buffer.x == 0)
