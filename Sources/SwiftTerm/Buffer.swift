@@ -674,7 +674,25 @@ public final class Buffer {
         return cols
     }
 
-    func getLinesToRemove (oldCols: Int, newCols: Int, bufferAbsoluteY: Int, nullChar: CharData) -> [Int]
+    /// Records where the cursor's logical position landed after a
+    /// `getLinesToRemove` pass that joined a wrapped block which
+    /// contained the cursor. `originalRow` is a buffer index in the
+    /// PRE-compaction coordinate space — the caller (`reflowWider`)
+    /// translates it to the post-compaction row by subtracting the
+    /// number of lines removed at indices below it.
+    struct ReflowCursorTarget {
+        var originalRow: Int
+        var col: Int
+    }
+
+    func getLinesToRemove (
+        oldCols: Int,
+        newCols: Int,
+        bufferAbsoluteY: Int,
+        cursorX: Int,
+        nullChar: CharData,
+        cursorTarget: inout ReflowCursorTarget?
+    ) -> [Int]
     {
         // Gather all BufferLines that need to be removed from the Buffer here so that they can be
         // batched up and only committed once
@@ -700,11 +718,31 @@ public final class Buffer {
                 nextLine = lines [i]
             }
 
-            // If these lines contain the cursor don't touch them, the program will handle fixing up wrapped
-            // lines with the cursor
-            if bufferAbsoluteY >= y && bufferAbsoluteY < i {
-                y += wrappedLines.count - 1
-                continue
+            // If this block contains the cursor, capture its logical
+            // character offset from the start of the block before we
+            // copy data around. Earlier versions skipped the cursor
+            // block entirely on the assumption that the host program
+            // would "fix up" the wrapped lines on SIGWINCH. zsh / bash
+            // / claude-code all just clear-from-cursor-down and rewrite,
+            // so leaving the original wrapped fragments in place
+            // produces the visible-duplication bug at startup, when the
+            // shell's first prompt was emitted into the brief 2×N
+            // initial-layout buffer and then the view grows wide. We
+            // join the block instead and translate the cursor's
+            // position to wherever it ends up in the merged content.
+            let cursorInBlock = bufferAbsoluteY >= y && bufferAbsoluteY < i
+            var cursorCharOffset = 0
+            if cursorInBlock {
+                let cursorRowInBlock = bufferAbsoluteY - y
+                for ri in 0..<cursorRowInBlock {
+                    cursorCharOffset += getWrappedLineTrimmedLength(wrappedLines, ri, oldCols)
+                }
+                // Phantom column (cursorX == oldCols, set when the
+                // last write filled the line and is awaiting autowrap)
+                // maps to "right after the last cell" — the row's
+                // trimmed length already represents that boundary.
+                let rowLen = getWrappedLineTrimmedLength(wrappedLines, cursorRowInBlock, oldCols)
+                cursorCharOffset += min(cursorX, rowLen)
             }
 
             // Copy buffer data to new locations
@@ -749,6 +787,21 @@ public final class Buffer {
             // Clear out remaining cells or fragments could remain;
             wrappedLines [destLineIndex].replaceCells (start: destCol, end: newCols, fillData: nullChar)
 
+            if cursorInBlock {
+                // Map the cursor's character offset to (row, col) in
+                // the merged layout. Wide-character wrap edges are not
+                // perfectly handled here — the caller clamps to the
+                // viewport so a one-cell drift is harmless — but the
+                // common case (no wide chars at the wrap point) is
+                // exact. `originalRow` is in pre-compaction indices.
+                let newRowInBlock = cursorCharOffset / newCols
+                let newCol = cursorCharOffset % newCols
+                cursorTarget = ReflowCursorTarget(
+                    originalRow: y + newRowInBlock,
+                    col: newCol
+                )
+            }
+
             // Work backwards and remove any rows at the end that only contain null cells
             var countToRemove = 0
             var ix = wrappedLines.count-1
@@ -775,8 +828,16 @@ public final class Buffer {
     
     func reflowWider (_ oldCols: Int, _ oldRows: Int, _ newCols: Int, _ newRows: Int)
     {
-        let toRemove = getLinesToRemove(oldCols: oldCols, newCols: newCols, bufferAbsoluteY: yBase + y, nullChar: CharData.Null)
-        
+        var cursorTarget: ReflowCursorTarget? = nil
+        let toRemove = getLinesToRemove(
+            oldCols: oldCols,
+            newCols: newCols,
+            bufferAbsoluteY: yBase + y,
+            cursorX: x,
+            nullChar: CharData.Null,
+            cursorTarget: &cursorTarget
+        )
+
         //print ("Lines to remove: \(toRemove) \(toRemove.count)")
         if toRemove.count > 0 {
             // Create new layout
@@ -842,9 +903,45 @@ public final class Buffer {
                 }
             }
             savedY = max (savedY - countRemovedSoFar, 0)
+
+            // If the cursor was inside one of the merged blocks, the
+            // viewport-adjustment loop above moved `y` by the count of
+            // removed-from-front lines, which only matches reality
+            // when the removed lines preceded the cursor. With the
+            // cursor block now being merged in place, we know exactly
+            // where the cursor's content ended up — overrride to that
+            // position. Translate `originalRow` from pre-compaction
+            // index space by counting how many lines were stripped at
+            // smaller indices.
+            if let target = cursorTarget {
+                var removedBefore = 0
+                var ti = 0
+                while ti + 1 < toRemove.count {
+                    let removeStart = toRemove[ti]
+                    let removeCount = toRemove[ti + 1]
+                    if removeStart >= target.originalRow {
+                        break
+                    }
+                    // Target rows are always preserved (we removed
+                    // empty trailing rows of merged blocks); they
+                    // can't fall inside a removed range.
+                    removedBefore += removeCount
+                    ti += 2
+                }
+                let newAbsoluteRow = target.originalRow - removedBefore
+                let clampedY = max(0, min(newAbsoluteRow - yBase, newRows - 1))
+                self.y = clampedY
+                self.x = min(target.col, newCols - 1)
+            }
+        } else if let target = cursorTarget {
+            // No lines were removed (block already collapsed to one
+            // line) but the cursor's column may still need correcting.
+            let clampedY = max(0, min(target.originalRow - yBase, newRows - 1))
+            self.y = clampedY
+            self.x = min(target.col, newCols - 1)
         }
     }
-    
+
     // Gets the new line lengths for a given wrapped line. The purpose of this function it to pre-
     // compute the wrapping points since wide characters may need to be wrapped onto the following line.
     // This function will return an array of numbers of where each line wraps to, the resulting array
@@ -910,12 +1007,32 @@ public final class Buffer {
 
         // Go backwards as many lines may be trimmed and this will avoid considering them
         var y = lines.count-1
+        let cursorAbsolute = yBase + self.y
         while y >= 0 {
             defer { y -= 1 }
             // Check whether this line is a problem or not, if not skip it
             var nextLine = lines [y]
             let lineLength = nextLine.getTrimmedLength ()
             if !nextLine.isWrapped && lineLength <= newCols {
+                continue
+            }
+
+            // Don't introduce a NEW wrap on an unwrapped line that
+            // sits above the cursor. That used to convert e.g. a 102-
+            // char prompt at row 0 into a 2-row wrapped block when the
+            // user dragged from 102 to 101 cols, which `viewportAdjustments`
+            // below would compensate for by bumping `self.y` down. The
+            // shell, on its SIGWINCH redraw, then issues `\r\e[J` from
+            // the bumped row, so the wrapped tail of the old prompt
+            // stays visible above and a new prompt prints below — the
+            // sidebar-resize duplication bug. Falling through to the
+            // post-reflow `lines[i].resize(newCols)` step in
+            // `Buffer.resize` truncates the over-wide content instead,
+            // which keeps the cursor on its row and stays in sync with
+            // what the shell is about to redraw. Already-wrapped blocks
+            // (continuations) and lines at-or-below the cursor still
+            // get re-narrowed normally — those don't desync the shell.
+            if !nextLine.isWrapped && y < cursorAbsolute {
                 continue
             }
 
@@ -1179,7 +1296,7 @@ public final class Buffer {
 
     func insertCharacter(_ charData: CharData) {
         var chWidth = Int (charData.width)
-        
+
         let right = marginMode ? _marginRight : _cols - 1
         // goto next line if ch would overflow
         // TODO: needs a global min terminal width of 2
@@ -1191,7 +1308,7 @@ public final class Buffer {
             // automatically wraps to the beginning of the next line
             if wraparound {
                 _x = marginMode ? _marginLeft : 0
-                
+
                 if _y >= _scrollBottom {
                     scroll (true)
                 } else {
