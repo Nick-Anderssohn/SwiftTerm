@@ -217,6 +217,34 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// after the user pauses).
     public var resizeDebounceMs: Int = 200
 
+    /// Host-driven gate that completely defers `terminal.resize` (and the
+    /// downstream TIOCSWINSZ ioctl) while a user gesture is in flight —
+    /// window live-resize, an embedding app's custom split-pane drag,
+    /// etc. While true, `processSizeChange` records that a resize
+    /// arrived but neither applies it nor arms the coalescing timer.
+    /// Flipping back to false flushes the suspended resize once at the
+    /// view's current `frame.size`.
+    ///
+    /// This is the principled "wait for mouse-up" path. The 200 ms
+    /// `resizeDebounceMs` coalescer is a heuristic that doesn't fully
+    /// close the SIGWINCH-vs-shell-redraw race responsible for stacked
+    /// prompt fragments after fast resizes; a host-driven gesture gate
+    /// does. Coalescing remains the default for non-gesture bursts;
+    /// suspension is opt-in.
+    ///
+    /// Thread: main only. The `didSet` flushes synchronously on the
+    /// trailing edge.
+    public var hostSuspendsResize: Bool = false {
+        didSet {
+            // Only flush on true → false. Entering suspension is
+            // non-destructive; any in-flight 200 ms timer is still
+            // valid (it re-checks `hostSuspendsResize` on fire and
+            // re-defers if still suspended).
+            guard oldValue && !hostSuspendsResize else { return }
+            flushSuspendedResize()
+        }
+    }
+
     // Coalescer state. Touched only on the main thread.
     var pendingResizeScheduled: Bool = false
     var pendingResizeArrived: Bool = false

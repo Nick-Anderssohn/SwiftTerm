@@ -186,6 +186,28 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// after the user pauses).
     public var resizeDebounceMs: Int = 200
 
+    /// Host-driven gate that completely defers `terminal.resize` (and the
+    /// downstream TIOCSWINSZ ioctl) while a user gesture is in flight —
+    /// custom split-pane drag, etc. UIKit doesn't ship an analogue of
+    /// macOS's `inLiveResize`, so this is the only signal an iOS host
+    /// has. While true, `processSizeChange` records that a resize
+    /// arrived but neither applies it nor arms the coalescing timer.
+    /// Flipping back to false flushes the suspended resize once at the
+    /// view's current `bounds.size`.
+    ///
+    /// See the macOS counterpart in `MacTerminalView` for the full
+    /// rationale (SIGWINCH-vs-shell-redraw race, why coalescing alone
+    /// is insufficient, etc.).
+    ///
+    /// Thread: main only. The `didSet` flushes synchronously on the
+    /// trailing edge.
+    public var hostSuspendsResize: Bool = false {
+        didSet {
+            guard oldValue && !hostSuspendsResize else { return }
+            flushSuspendedResize()
+        }
+    }
+
     // Coalescer state. Touched only on the main thread.
     var pendingResizeScheduled: Bool = false
     var pendingResizeArrived: Bool = false

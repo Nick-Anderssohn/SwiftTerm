@@ -205,12 +205,29 @@ extension TerminalView {
     /// synchronously, which preserves the pre-coalesce behavior — useful
     /// for tests and any consumer that needs immediate reflow).
     ///
+    /// When the host has set `hostSuspendsResize = true`, this records that
+    /// a resize arrived but neither applies it nor arms the coalescing
+    /// timer; the suspended apply runs once when the host flips the flag
+    /// back to false (see the `didSet` on each platform's TerminalView).
+    /// This is the principled "wait for mouse-up" path — coalescing's
+    /// 200 ms window is a heuristic that doesn't fully close the
+    /// SIGWINCH-vs-shell-redraw race; a host-driven gesture gate does.
+    ///
     /// Returns true only when applying synchronously and the cell grid
-    /// actually changed. When deferred, returns false (the apply happens
-    /// later in the timer callback).
+    /// actually changed. When deferred (or suspended), returns false.
     @discardableResult
     func processSizeChange (newSize: CGSize) -> Bool {
         if newSize.width == 0 && newSize.height == 0 {
+            return false
+        }
+
+        if hostSuspendsResize {
+            // Latest-wins: record that a resize arrived. We don't store
+            // newSize because the host's eventual flush re-reads live
+            // geometry — that way the final apply uses whatever the most
+            // recent AppKit/UIKit layout pass settled on, even if it
+            // landed after this call.
+            pendingResizeArrived = true
             return false
         }
 
@@ -231,6 +248,13 @@ extension TerminalView {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self else { return }
             self.pendingResizeScheduled = false
+            // Re-check suspension: a host gesture (window live-resize,
+            // sidebar drag) can start during the debounce window. If it
+            // did, leave `pendingResizeArrived = true` so the host's
+            // eventual flush picks it up; do NOT apply now.
+            if self.hostSuspendsResize {
+                return
+            }
             guard self.pendingResizeArrived else { return }
             self.pendingResizeArrived = false
             #if os(macOS)
@@ -241,6 +265,29 @@ extension TerminalView {
             _ = self.applySizeChange(newSize: live)
         }
         return false
+    }
+
+    /// Apply any resize that was suspended by `hostSuspendsResize`.
+    /// Called from each platform's `hostSuspendsResize.didSet` on the
+    /// trailing edge (`true → false`). Reads live geometry at call time
+    /// — `pendingResizeArrived` is the only state we need; `newSize` is
+    /// always re-derived from the view's current frame/bounds so the
+    /// flush uses the geometry the user actually released the mouse at.
+    /// Idempotent when no resize is pending.
+    func flushSuspendedResize() {
+        guard pendingResizeArrived else { return }
+        pendingResizeArrived = false
+        // Cancelling any in-flight coalescer flag too — if a debounce
+        // timer is still pending it will wake, see neither flag set,
+        // and no-op. (We can't actually cancel the asyncAfter, so the
+        // flag is the cancellation token.)
+        pendingResizeScheduled = false
+        #if os(macOS)
+        let live = self.frame.size
+        #else
+        let live = self.bounds.size
+        #endif
+        _ = applySizeChange(newSize: live)
     }
 
     /// Synchronous apply path. Computes new (cols, rows) from a pixel
