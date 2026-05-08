@@ -207,6 +207,20 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// https://gist.github.com/lukaskubanek/9a61ac71dc0db8bb04db2028f2635779
     /// https://developer.apple.com/forums/thread/663256?answerId=646653022#646653022
     public var disableFullRedrawOnAnyChanges = false
+
+    /// Coalescing window for UI-driven resize events, in milliseconds.
+    /// Setting to 0 disables coalescing (each `processSizeChange` applies
+    /// synchronously). Default 200 ms — matches iTerm2's WinSizeController
+    /// throttle. Aggressive enough that even sustained shake-drags collapse
+    /// to one apply per window; the trade-off is a visibly delayed reflow on
+    /// slow drags (the cell grid stays at the old col count until ~200 ms
+    /// after the user pauses).
+    public var resizeDebounceMs: Int = 200
+
+    // Coalescer state. Touched only on the main thread.
+    var pendingResizeScheduled: Bool = false
+    var pendingResizeArrived: Bool = false
+
     var fontSet: FontSet
 
     /// The font to use to render the terminal

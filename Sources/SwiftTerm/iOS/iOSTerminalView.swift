@@ -177,6 +177,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
      */
     public var notifyUpdateChanges = false
 
+    /// Coalescing window for UI-driven resize events, in milliseconds.
+    /// Setting to 0 disables coalescing (each `processSizeChange` applies
+    /// synchronously). Default 200 ms — matches iTerm2's WinSizeController
+    /// throttle. Aggressive enough that even sustained shake-drags collapse
+    /// to one apply per window; the trade-off is a visibly delayed reflow on
+    /// slow drags (the cell grid stays at the old col count until ~200 ms
+    /// after the user pauses).
+    public var resizeDebounceMs: Int = 200
+
+    // Coalescer state. Touched only on the main thread.
+    var pendingResizeScheduled: Bool = false
+    var pendingResizeArrived: Bool = false
+
     /// If true, the caret view will show different shapes depending on the focus
     /// otherwise, it will behave like it is focused
     public var caretViewTracksFocus: Bool {

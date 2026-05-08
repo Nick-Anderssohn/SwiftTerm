@@ -194,26 +194,75 @@ extension TerminalView {
         return terminal
     }
     
-    /// This function computes the new columns and rows for the terminal when a pixel-size changes
-    /// Returns true if this changed the number of columns/rows, false otherwise
+    /// Entry point for UI-driven pixel-size changes. Coalesces rapid
+    /// bursts (sidebar drag, window live-resize) into a single delegate
+    /// fan-out at the latest geometry, gating both `terminal.resize` and
+    /// the downstream TIOCSWINSZ ioctl behind a `resizeDebounceMs`-wide
+    /// window. Latest-wins; the timer is NOT rescheduled by new arrivals,
+    /// so a sustained drag still lands once per window rather than never.
+    ///
+    /// Setting `resizeDebounceMs = 0` disables coalescing (the apply runs
+    /// synchronously, which preserves the pre-coalesce behavior — useful
+    /// for tests and any consumer that needs immediate reflow).
+    ///
+    /// Returns true only when applying synchronously and the cell grid
+    /// actually changed. When deferred, returns false (the apply happens
+    /// later in the timer callback).
     @discardableResult
     func processSizeChange (newSize: CGSize) -> Bool {
         if newSize.width == 0 && newSize.height == 0 {
             return false
         }
+
+        if resizeDebounceMs <= 0 {
+            return applySizeChange(newSize: newSize)
+        }
+
+        // Latest-wins via flag. We re-read live geometry at fire time
+        // rather than storing newSize, so the apply uses whatever the
+        // most recent AppKit/UIKit layout pass settled on — not a stale
+        // value captured at the first call in the burst.
+        pendingResizeArrived = true
+        if pendingResizeScheduled {
+            return false
+        }
+        pendingResizeScheduled = true
+        let delay = DispatchTimeInterval.milliseconds(resizeDebounceMs)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            self.pendingResizeScheduled = false
+            guard self.pendingResizeArrived else { return }
+            self.pendingResizeArrived = false
+            #if os(macOS)
+            let live = self.frame.size
+            #else
+            let live = self.bounds.size
+            #endif
+            _ = self.applySizeChange(newSize: live)
+        }
+        return false
+    }
+
+    /// Synchronous apply path. Computes new (cols, rows) from a pixel
+    /// size, calls `terminal.resize` if the cell grid changed, and fires
+    /// the `TerminalViewDelegate.sizeChanged` fan-out (which on macOS
+    /// triggers TIOCSWINSZ via `LocalProcessTerminalView.sizeChanged`).
+    /// Returns true if the cell grid actually changed.
+    @discardableResult
+    func applySizeChange (newSize: CGSize) -> Bool {
         let newRows = Int (newSize.height / cellDimension.height)
         let newCols = Int (getEffectiveWidth (size: newSize) / cellDimension.width)
-        
+
         if newCols != terminal.cols || newRows != terminal.rows {
             selection.active = false
             terminal.resize (cols: newCols, rows: newRows)
-            
+
             // These used to be outside
             accessibility.invalidate ()
             search.invalidate ()
-            
+
             terminalDelegate?.sizeChanged (source: self, newCols: newCols, newRows: newRows)
-           
+
             updateScroller()
             return true
         }
