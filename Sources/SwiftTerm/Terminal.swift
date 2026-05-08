@@ -680,12 +680,12 @@ open class Terminal {
         self.options = options
         // This duplicates the setup above, but
         parser = EscapeSequenceParser()
-        normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback)
+        normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback, reflowCursorLine: options.reflowCursorLine)
         normalBuffer.fillViewportRows()
 
         // The alt buffer should never have scrollback.
         // See http://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
-        altBuffer = Buffer (cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: nil)
+        altBuffer = Buffer (cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: nil, reflowCursorLine: options.reflowCursorLine)
         buffer = normalBuffer
 
         cc = CC(send8bit: false)
@@ -784,7 +784,7 @@ open class Terminal {
     }
     
     public func resetNormalBuffer() {
-        normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback)
+        normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback, reflowCursorLine: options.reflowCursorLine)
         normalBuffer.scroll = scroll(isWrapped:)
         normalBuffer.linesEvicted = { [weak self] count in self?.selection?.didEvictTopLines(count: count) }
 
@@ -5594,7 +5594,7 @@ open class Terminal {
 
     private func snapshotBuffer (_ source: Buffer) -> Buffer
     {
-        let copy = Buffer(cols: source.cols, rows: source.rows, tabStopWidth: tabStopWidth, scrollback: source.scrollback)
+        let copy = Buffer(cols: source.cols, rows: source.rows, tabStopWidth: tabStopWidth, scrollback: source.scrollback, reflowCursorLine: source.reflowCursorLine)
         copy.xDisp = source.xDisp
         copy.yDisp = source.yDisp
         copy.xBase = source.xBase

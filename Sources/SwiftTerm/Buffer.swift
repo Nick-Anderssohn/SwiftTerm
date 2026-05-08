@@ -185,6 +185,11 @@ public final class Buffer {
     public var savedCharset: [UInt8:String]? = nil
     
     var hasScrollback : Bool
+    /// Mirrors `TerminalOptions.reflowCursorLine`. When true, `getLinesToRemove`
+    /// merges wrapped blocks containing the cursor on widen and translates the
+    /// cursor's logical position into the merged layout. When false (default),
+    /// such blocks are skipped on widen — matching xterm semantics.
+    var reflowCursorLine: Bool
     var cols: Int {
         get { _cols }
         set { _cols = newValue }
@@ -281,8 +286,9 @@ public final class Buffer {
         self.wraparound = value
     }
 
-    public init (cols: Int, rows: Int, tabStopWidth: Int, scrollback: Int?) {
+    public init (cols: Int, rows: Int, tabStopWidth: Int, scrollback: Int?, reflowCursorLine: Bool = false) {
         self.hasScrollback = scrollback != nil
+        self.reflowCursorLine = reflowCursorLine
         _yDisp = 0
         xDisp = 0
         _yBase = 0
@@ -718,19 +724,35 @@ public final class Buffer {
                 nextLine = lines [i]
             }
 
-            // If this block contains the cursor, capture its logical
-            // character offset from the start of the block before we
-            // copy data around. Earlier versions skipped the cursor
-            // block entirely on the assumption that the host program
-            // would "fix up" the wrapped lines on SIGWINCH. zsh / bash
-            // / claude-code all just clear-from-cursor-down and rewrite,
-            // so leaving the original wrapped fragments in place
-            // produces the visible-duplication bug at startup, when the
-            // shell's first prompt was emitted into the brief 2×N
-            // initial-layout buffer and then the view grows wide. We
-            // join the block instead and translate the cursor's
-            // position to wherever it ends up in the merged content.
+            // If a wrapped block contains the cursor on widen, two
+            // policies are possible:
+            //
+            //   - `reflowCursorLine == false` (default, xterm semantics):
+            //     skip the merge. The host program is expected to redraw
+            //     on SIGWINCH; reflowing the cursor's line could fight
+            //     with that redraw. This is what upstream SwiftTerm and
+            //     xterm do; it is the contract pinned by
+            //     `testResizeNoReflowWithoutScrollback`.
+            //
+            //   - `reflowCursorLine == true` (opt-in, matches xterm.js
+            //     `reflowCursorLine: true`): merge the block and translate
+            //     the cursor's logical character offset into (row, col)
+            //     in the merged layout. Use this when the host environment
+            //     gives the view a brief tiny initial size before the
+            //     real geometry resolves — without this, the shell prints
+            //     its first prompt into the tiny buffer, the prompt
+            //     fragments across many wrapped rows, and on widen those
+            //     fragments stay stranded above the redrawn prompt
+            //     because shells like zsh / bash / fish only clear below
+            //     cursor (`\r\e[J`).
             let cursorInBlock = bufferAbsoluteY >= y && bufferAbsoluteY < i
+            if cursorInBlock && !reflowCursorLine {
+                // Skip the merge: leave the wrapped block in place and
+                // advance past it. Matches the pre-2026 SwiftTerm and
+                // upstream xterm behavior.
+                y += wrappedLines.count - 1
+                continue
+            }
             var cursorCharOffset = 0
             if cursorInBlock {
                 let cursorRowInBlock = bufferAbsoluteY - y

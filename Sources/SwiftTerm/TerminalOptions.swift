@@ -77,6 +77,19 @@ public struct TerminalOptions {
     /// Width for individual Regional Indicator symbols. `.wide` (default) preserves existing
     /// behavior. `.narrow` matches system wcwidth() and avoids cursor divergence with tmux.
     public var regionalIndicatorWidth: RegionalIndicatorWidth
+    /// Whether `reflowWider` should join wrapped blocks that contain the cursor and
+    /// translate the cursor's logical position into the merged layout.
+    /// When `false` (default, matches xterm/upstream SwiftTerm semantics), wrapped
+    /// blocks containing the cursor are skipped on widen — the running program is
+    /// expected to redraw on SIGWINCH.
+    /// When `true` (matches xterm.js's `reflowCursorLine: true`), the merge runs
+    /// and the cursor is translated to its new (row, col) in the joined layout.
+    /// This prevents stranded wrap fragments above the redrawn prompt when the
+    /// shell uses clear-below-cursor (`\r\e[J`) for its redraw — the visible
+    /// "prompt-stack on widen" bug. Set this when hosting interactive shells in
+    /// a view whose initial layout is briefly tiny (e.g. a sidebar terminal that
+    /// resolves geometry over a few frames after spawn).
+    public var reflowCursorLine: Bool
 
     /// Default options
     public static let `default` = TerminalOptions.init(cols: 80,
@@ -90,11 +103,13 @@ public struct TerminalOptions {
                                                        enableSixelReported: true,
                                                        kittyImageCacheLimitBytes: 320 * 1024 * 1024,
                                                        ansi256PaletteStrategy: .base16Lab,
-                                                       regionalIndicatorWidth: .wide)
+                                                       regionalIndicatorWidth: .wide,
+                                                       reflowCursorLine: false)
 
   public init(cols: Int = Self.default.cols, rows: Int = Self.default.rows, convertEol: Bool = Self.default.convertEol, termName: String = Self.default.termName, cursorStyle: CursorStyle = Self.default.cursorStyle, screenReaderMode: Bool = Self.default.screenReaderMode, scrollback: Int = Self.default.scrollback, tabStopWidth: Int = Self.default.tabStopWidth,
               enableSixelReported: Bool = Self.default.enableSixelReported, kittyImageCacheLimitBytes: Int = Self.default.kittyImageCacheLimitBytes, ansi256PaletteStrategy: Ansi256PaletteStrategy = Self.default.ansi256PaletteStrategy,
-              regionalIndicatorWidth: RegionalIndicatorWidth = Self.default.regionalIndicatorWidth) {
+              regionalIndicatorWidth: RegionalIndicatorWidth = Self.default.regionalIndicatorWidth,
+              reflowCursorLine: Bool = Self.default.reflowCursorLine) {
         self.cols = cols
         self.rows = rows
         self.convertEol = convertEol
@@ -107,5 +122,6 @@ public struct TerminalOptions {
         self.kittyImageCacheLimitBytes = kittyImageCacheLimitBytes
         self.ansi256PaletteStrategy = ansi256PaletteStrategy
         self.regionalIndicatorWidth = regionalIndicatorWidth
+        self.reflowCursorLine = reflowCursorLine
     }
 }
