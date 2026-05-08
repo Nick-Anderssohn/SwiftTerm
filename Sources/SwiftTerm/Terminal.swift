@@ -332,6 +332,23 @@ open class Terminal {
     /// Terminal configuration options.
     /// Setup(isReset:) method should be called to apply changes
     public var options: TerminalOptions
+
+    /// Whether `reflowWider` should join wrapped blocks containing the cursor
+    /// and translate the cursor's logical position into the merged layout.
+    /// Mirrors `TerminalOptions.reflowCursorLine`. Setting this after
+    /// construction propagates the change to both the normal and alternate
+    /// buffers immediately, without needing a `setup()` round-trip — host
+    /// apps that decide reflow policy based on view state (e.g. "we use a
+    /// briefly-tiny initial layout that requires merging on widen") can flip
+    /// it any time after the `Terminal` is constructed.
+    public var reflowCursorLine: Bool {
+        get { options.reflowCursorLine }
+        set {
+            options.reflowCursorLine = newValue
+            normalBuffer.reflowCursorLine = newValue
+            altBuffer.reflowCursorLine = newValue
+        }
+    }
     
     // The current buffers
     var normalBuffer, altBuffer: Buffer
