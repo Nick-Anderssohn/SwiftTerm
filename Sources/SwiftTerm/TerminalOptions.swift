@@ -38,6 +38,29 @@ public enum CursorStyle {
     }
 }
 
+/// Luminance-aware glyph coverage strategy applied in the Metal grayscale text
+/// fragment shader. Mirrors the input pair of Kitty's
+/// `text_composition_strategy` config option (see
+/// `kitty/cell_fragment.glsl`): a per-cell mix of identity coverage and
+/// `pow(coverage, 1/gamma)`, weighted by `(1 - L_fg + L_bg) * 0.5` so that
+/// dark-on-light text gets thickened toward Apple Terminal's heavy
+/// dilation while light-on-dark text is barely touched. Color emoji are
+/// not affected — they go through a separate fragment shader.
+public enum TextCompositionStrategy: Sendable, Hashable {
+    /// Disable the curve. Glyph alpha goes to the framebuffer as
+    /// rasterized. iOS / non-macOS default.
+    case identity
+    /// Apple-Terminal-approximating curve from Kitty's
+    /// `text_composition_strategy 1.7 30`. macOS default. Heavily
+    /// dilates dark-on-light text, lightly dilates light-on-dark.
+    case appleApprox
+    /// Custom (gamma, contrast) tuple. Same units as Kitty's config:
+    /// `gamma` is the user-facing value (not the reciprocal the shader
+    /// sees), `contrastPercent` is in percent (e.g. 30.0 means a 1.30×
+    /// coverage multiplier).
+    case custom(gamma: Float, contrastPercent: Float)
+}
+
 /// Width to assign to individual (unpaired) Regional Indicator symbols (U+1F1E6–U+1F1FF).
 /// Combined flag pairs (e.g. 🇺🇸) are always rendered as width 2 regardless of this setting.
 public enum RegionalIndicatorWidth: Sendable {
@@ -90,6 +113,24 @@ public struct TerminalOptions {
     /// a view whose initial layout is briefly tiny (e.g. a sidebar terminal that
     /// resolves geometry over a few frames after spawn).
     public var reflowCursorLine: Bool
+    /// Coverage-curve strategy applied in the Metal grayscale text fragment
+    /// shader. macOS defaults to `.appleApprox` (Kitty's `1.7 30`
+    /// parameters) so dark-on-light text reads close to Apple Terminal's
+    /// heavy dilation; other platforms default to `.identity`. Has no
+    /// effect when the Metal renderer is not in use.
+    public var textCompositionStrategy: TextCompositionStrategy
+
+    /// Per-platform default for `textCompositionStrategy`. macOS gets
+    /// `.appleApprox` so the Apple-Terminal-matching curve runs by default
+    /// in light mode; iOS/visionOS get `.identity` to preserve their
+    /// existing look.
+    public static var defaultTextCompositionStrategy: TextCompositionStrategy {
+        #if os(macOS)
+        return .appleApprox
+        #else
+        return .identity
+        #endif
+    }
 
     /// Default options
     public static let `default` = TerminalOptions.init(cols: 80,
@@ -104,12 +145,14 @@ public struct TerminalOptions {
                                                        kittyImageCacheLimitBytes: 320 * 1024 * 1024,
                                                        ansi256PaletteStrategy: .base16Lab,
                                                        regionalIndicatorWidth: .wide,
-                                                       reflowCursorLine: false)
+                                                       reflowCursorLine: false,
+                                                       textCompositionStrategy: TerminalOptions.defaultTextCompositionStrategy)
 
   public init(cols: Int = Self.default.cols, rows: Int = Self.default.rows, convertEol: Bool = Self.default.convertEol, termName: String = Self.default.termName, cursorStyle: CursorStyle = Self.default.cursorStyle, screenReaderMode: Bool = Self.default.screenReaderMode, scrollback: Int = Self.default.scrollback, tabStopWidth: Int = Self.default.tabStopWidth,
               enableSixelReported: Bool = Self.default.enableSixelReported, kittyImageCacheLimitBytes: Int = Self.default.kittyImageCacheLimitBytes, ansi256PaletteStrategy: Ansi256PaletteStrategy = Self.default.ansi256PaletteStrategy,
               regionalIndicatorWidth: RegionalIndicatorWidth = Self.default.regionalIndicatorWidth,
-              reflowCursorLine: Bool = Self.default.reflowCursorLine) {
+              reflowCursorLine: Bool = Self.default.reflowCursorLine,
+              textCompositionStrategy: TextCompositionStrategy = Self.defaultTextCompositionStrategy) {
         self.cols = cols
         self.rows = rows
         self.convertEol = convertEol
@@ -123,5 +166,6 @@ public struct TerminalOptions {
         self.ansi256PaletteStrategy = ansi256PaletteStrategy
         self.regionalIndicatorWidth = regionalIndicatorWidth
         self.reflowCursorLine = reflowCursorLine
+        self.textCompositionStrategy = textCompositionStrategy
     }
 }

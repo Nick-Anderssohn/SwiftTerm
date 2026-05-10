@@ -631,5 +631,10 @@ struct BoxDrawingRenderItem {
     let columnWidth: Int
     let codePoint: UInt32
     let foregroundColor: TTColor
+    /// Background color of the cell this glyph sits on. `nil` means the
+    /// terminal's default background — the renderer substitutes
+    /// `terminalView.nativeBackgroundColor` for the luminance term in
+    /// the text composition curve.
+    let backgroundColor: TTColor?
 }
 #endif

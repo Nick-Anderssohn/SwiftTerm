@@ -35,6 +35,11 @@ struct GlyphVertex {
     var position: SIMD2<Float>
     var texCoord: SIMD2<Float>
     var color: SIMD4<Float>
+    /// Rec-709 luminance of the background the glyph sits on, fed to
+    /// the grayscale text fragment shader for the Kitty-style coverage
+    /// curve. Ignored by the color (emoji) fragment shader. Image draws
+    /// pass 0 since they go through the color path.
+    var bgLuminance: Float
 }
 
 struct ColorVertex {
@@ -48,6 +53,9 @@ struct TextCell {
     var texOrigin: SIMD2<Float>
     var texSize: SIMD2<Float>
     var color: SIMD4<Float>
+    /// Rec-709 luminance of the background the glyph sits on. See
+    /// `GlyphVertex.bgLuminance`.
+    var bgLuminance: Float
 }
 
 struct ColorCell {
@@ -472,6 +480,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         bufferPool.beginFrame()
         let viewport = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
         let scrollOffset = currentScrollOffsetPx(scale: scale)
+        // Bind the text-composition uniform once per encoder; Metal
+        // keeps fragment buffer bindings across pipeline-state changes
+        // within the same encoder, so every grayscale text draw
+        // (per-row, per-frame, cursor) sees the same params without
+        // each call site having to re-bind.
+        bindTextCompositionParams(encoder: encoder)
 
         if let frame = drawData.frame {
             drawFrameData(frame, encoder: encoder, viewport: viewport, scrollOffset: scrollOffset)
@@ -988,6 +1002,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 let (tx0, ty0, tx1, ty1) = transformRect(x0: x0, y0: y0, x1: x1, y1: y1)
                 if let clipped = self.clipRect(tx0, ty0, tx1, ty1, u0, v0, u1, v1, clipRect) {
                     let color = colorToSIMD(item.foregroundColor)
+                    let bgColor = item.backgroundColor ?? terminalView.nativeBackgroundColor
+                    let bgLum = luminance(colorToSIMD(bgColor))
                     glyphCellsGray.append(makeTextCell(x0: clipped.x0,
                                                        y0: clipped.y0,
                                                        x1: clipped.x1,
@@ -996,7 +1012,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                                        v0: clipped.v0,
                                                        u1: clipped.u1,
                                                        v1: clipped.v1,
-                                                       color: color))
+                                                       color: color,
+                                                       bgLuminance: bgLum))
                 }
             }
 
@@ -1039,6 +1056,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 let (tx0, ty0, tx1, ty1) = transformRect(x0: x0, y0: y0, x1: x1, y1: y1)
                 if let clipped = self.clipRect(tx0, ty0, tx1, ty1, u0, v0, u1, v1, clipRect) {
                     let color = colorToSIMD(element.foregroundColor)
+                    let bgColor = element.backgroundColor ?? terminalView.nativeBackgroundColor
+                    let bgLum = luminance(colorToSIMD(bgColor))
                     glyphCellsGray.append(makeTextCell(x0: clipped.x0,
                                                        y0: clipped.y0,
                                                        x1: clipped.x1,
@@ -1047,7 +1066,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                                        v0: clipped.v0,
                                                        u1: clipped.u1,
                                                        v1: clipped.v1,
-                                                       color: color))
+                                                       color: color,
+                                                       bgLuminance: bgLum))
                 }
             }
         }
@@ -1220,6 +1240,17 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
                 let textColor = runAttributes[.foregroundColor] as? TTColor ?? terminalView.nativeForegroundColor
                 let textColorSIMD = colorToSIMD(textColor)
+                // Resolve the per-run background once: selection bg wins
+                // (matches the bg-cell builder above), otherwise the
+                // explicit attribute, otherwise the terminal's default
+                // bg. Feed the Rec-709 luminance into each TextCell so
+                // the grayscale fragment shader picks the right point on
+                // Kitty's text composition curve (heavy thickening for
+                // dark-on-light, near-identity for light-on-dark).
+                let runBgColor = (runAttributes[.selectionBackgroundColor] as? TTColor)
+                    ?? (runAttributes[.backgroundColor] as? TTColor)
+                    ?? terminalView.nativeBackgroundColor
+                let runBgLum = luminance(colorToSIMD(runBgColor))
 
                 var drawnGlyphsInRun = 0
                 for glyphRun in run.shaperRun.glyphRuns {
@@ -1261,7 +1292,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                                     v0: clipped.v0,
                                                     u1: clipped.u1,
                                                     v1: clipped.v1,
-                                                    color: color)
+                                                    color: color,
+                                                    bgLuminance: runBgLum)
                             switch entry.atlasKind {
                             case .grayscale:
                                 glyphCellsGray.append(cell)
@@ -1676,7 +1708,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
     private func glyphQuadVertices(x0: Float, y0: Float, x1: Float, y1: Float,
                                    u0: Float, v0: Float, u1: Float, v1: Float,
-                                   color: SIMD4<Float>) -> [GlyphVertex] {
+                                   color: SIMD4<Float>,
+                                   bgLuminance: Float = 0) -> [GlyphVertex] {
         let p0 = SIMD2<Float>(x0, y0)
         let p1 = SIMD2<Float>(x1, y0)
         let p2 = SIMD2<Float>(x0, y1)
@@ -1686,12 +1719,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let t2 = SIMD2<Float>(u0, v1)
         let t3 = SIMD2<Float>(u1, v1)
         return [
-            GlyphVertex(position: p0, texCoord: t0, color: color),
-            GlyphVertex(position: p1, texCoord: t1, color: color),
-            GlyphVertex(position: p2, texCoord: t2, color: color),
-            GlyphVertex(position: p1, texCoord: t1, color: color),
-            GlyphVertex(position: p3, texCoord: t3, color: color),
-            GlyphVertex(position: p2, texCoord: t2, color: color),
+            GlyphVertex(position: p0, texCoord: t0, color: color, bgLuminance: bgLuminance),
+            GlyphVertex(position: p1, texCoord: t1, color: color, bgLuminance: bgLuminance),
+            GlyphVertex(position: p2, texCoord: t2, color: color, bgLuminance: bgLuminance),
+            GlyphVertex(position: p1, texCoord: t1, color: color, bgLuminance: bgLuminance),
+            GlyphVertex(position: p3, texCoord: t3, color: color, bgLuminance: bgLuminance),
+            GlyphVertex(position: p2, texCoord: t2, color: color, bgLuminance: bgLuminance),
         ]
     }
 
@@ -1709,7 +1742,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               v0: Float,
                               u1: Float,
                               v1: Float,
-                              color: SIMD4<Float>) -> TextCell {
+                              color: SIMD4<Float>,
+                              bgLuminance: Float) -> TextCell {
         let position = SIMD2<Float>(x0, y0)
         let size = SIMD2<Float>(x1 - x0, y1 - y0)
         let texOrigin = SIMD2<Float>(u0, v0)
@@ -1718,7 +1752,19 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                         size: size,
                         texOrigin: texOrigin,
                         texSize: texSize,
-                        color: color)
+                        color: color,
+                        bgLuminance: bgLuminance)
+    }
+
+    /// Rec-709 luminance of a linear-or-sRGB SIMD4 color. Matches the
+    /// `kRec709` constant + `dot()` in `Shaders.metal` so the shader's
+    /// per-pixel `(1 - L_fg + L_bg) * 0.5` agrees with the value we
+    /// pre-compute on the CPU side. Treats the color components as
+    /// already in display gamma; this matches what we do everywhere
+    /// else (the framebuffer is not sRGB-correct yet — see plan
+    /// `risk register` for why we deliberately defer that).
+    private func luminance(_ color: SIMD4<Float>) -> Float {
+        return color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722
     }
 
     private final class BufferPool {
@@ -1995,6 +2041,47 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         var scrollOffsetVar = scrollOffset
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
         encoder.setVertexBytes(&scrollOffsetVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+    }
+
+    /// Bind the (1/gamma, contrastMultiplier) uniform consumed by
+    /// `terminal_text_fragment_gray`. Called from every grayscale text
+    /// draw site (per-row, per-frame, and cursor) so a Metal validation
+    /// failure ("Argument buffer not bound") is impossible. `.identity`
+    /// resolves to (1.0, 1.0), which makes the shader compute identity
+    /// coverage — used on iOS by default and by anyone explicitly
+    /// disabling the curve.
+    private func bindTextCompositionParams(encoder: MTLRenderCommandEncoder) {
+        var params = textCompositionParams
+        encoder.setFragmentBytes(&params, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+    }
+
+    /// Resolve the strategy in effect for the current frame to the
+    /// concrete (1/gamma, contrastMultiplier) pair the shader expects.
+    /// Reads `terminal.options.textCompositionStrategy` directly so the
+    /// `@objc open var` setter on `AppleTerminalView` (which mutates
+    /// the option) takes effect on the very next frame without any
+    /// extra plumbing.
+    private var textCompositionParams: SIMD2<Float> {
+        let strategy: TextCompositionStrategy
+        // `terminal` is declared `Terminal!` (implicitly unwrapped) on
+        // both Mac and iOS terminal views, so guard the chain rather
+        // than `?.`-chain through it.
+        if let view = terminalView, let term = view.terminal {
+            strategy = term.options.textCompositionStrategy
+        } else {
+            strategy = TerminalOptions.defaultTextCompositionStrategy
+        }
+        switch strategy {
+        case .identity:
+            return SIMD2<Float>(1.0, 1.0)
+        case .appleApprox:
+            // Kitty's macOS defaults: text_gamma_adjustment=1.7,
+            // text_contrast=30 → shader sees (1/1.7, 1+0.30).
+            return SIMD2<Float>(1.0 / 1.7, 1.30)
+        case .custom(let gamma, let contrastPercent):
+            let safeGamma = gamma > 0 ? gamma : 1.0
+            return SIMD2<Float>(1.0 / safeGamma, 1.0 + contrastPercent * 0.01)
+        }
     }
 
     /// Compute the scrollOffset uniform (in y-up pixels) that aligns
@@ -2275,6 +2362,11 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
         let yOffset = ceil(lineDescent + lineLeading)
         let textColorSIMD = colorToSIMD(caretTextColor)
+        // The cursor cell's background is the caret block itself
+        // (cursorColor); fg is caretTextColor. Pass that bg luminance
+        // through so the curve picks the right point for the inverted
+        // glyph drawn on top of the block.
+        let cursorBgLuminance = luminance(cursorColor)
 
         for run in runs {
             let runGlyphsCount = CTRunGetGlyphCount(run)
@@ -2323,7 +2415,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                                      x1: clipped.x1, y1: clipped.y1,
                                                      u0: clipped.u0, v0: clipped.v0,
                                                      u1: clipped.u1, v1: clipped.v1,
-                                                     color: color)
+                                                     color: color,
+                                                     bgLuminance: cursorBgLuminance)
                     switch entry.atlasKind {
                     case .grayscale:
                         glyphVerticesGray.append(contentsOf: vertices)

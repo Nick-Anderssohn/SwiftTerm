@@ -94,6 +94,25 @@ extension TerminalView {
         get { _fontSmoothing }
         set { _fontSmoothing = newValue }
     }
+
+    /// Controls the luminance-aware coverage curve applied in the Metal
+    /// grayscale text fragment shader. Defaults to `.appleApprox` on
+    /// macOS (Kitty's `1.7 30` parameters) so dark-on-light text reads
+    /// close to Apple Terminal's heavy stem-darkening; light-on-dark
+    /// stays close to identity. Set to `.identity` to disable, or
+    /// `.custom(gamma:contrastPercent:)` to tune empirically. The
+    /// renderer reads this lazily on the next frame; the setter
+    /// triggers a repaint so the new params take effect immediately.
+    /// Cannot be `@objc` because the enum carries associated values;
+    /// Swift embedders use it directly, ObjC embedders mutate
+    /// `terminal.options.textCompositionStrategy` instead.
+    open var textCompositionStrategy: TextCompositionStrategy {
+        get { terminal.options.textCompositionStrategy }
+        set {
+            terminal.options.textCompositionStrategy = newValue
+            queuePendingDisplay()
+        }
+    }
 #endif
 
     /// Multiplier for vertical line spacing. 1.0 = default (ascent + descent + leading).
@@ -813,10 +832,13 @@ extension TerminalView {
                ch.code <= BoxDrawingRenderer.upperBoundary {
                 flushPending()
                 let fgColor = (currentAttributes[.foregroundColor] as? TTColor) ?? nativeForegroundColor
+                let bgColor = (currentAttributes[.selectionBackgroundColor] as? TTColor)
+                    ?? (currentAttributes[.backgroundColor] as? TTColor)
                 boxDrawings.append(BoxDrawingRenderItem(column: col,
                                                         columnWidth: width,
                                                         codePoint: UInt32(ch.code),
-                                                        foregroundColor: fgColor))
+                                                        foregroundColor: fgColor,
+                                                        backgroundColor: bgColor))
                 builder?.append(text: " ", attributes: currentAttributes)
                 previousPlaceholder = nil
                 previousPlaceholderAttribute = nil
@@ -827,11 +849,14 @@ extension TerminalView {
                       let rects = BlockElementMapping.rects(for: UInt32(ch.code)) {
                 flushPending()
                 let fgColor = (currentAttributes[.foregroundColor] as? TTColor) ?? nativeForegroundColor
+                let bgColor = (currentAttributes[.selectionBackgroundColor] as? TTColor)
+                    ?? (currentAttributes[.backgroundColor] as? TTColor)
                 blockElements.append(BlockElementRenderItem(column: col,
                                                             columnWidth: width,
                                                             codePoint: UInt32(ch.code),
                                                             rects: rects,
-                                                            foregroundColor: fgColor))
+                                                            foregroundColor: fgColor,
+                                                            backgroundColor: bgColor))
                 builder?.append(text: " ", attributes: currentAttributes)
                 previousPlaceholder = nil
                 previousPlaceholderAttribute = nil
