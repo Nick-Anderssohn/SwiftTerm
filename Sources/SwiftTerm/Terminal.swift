@@ -662,6 +662,10 @@ open class Terminal {
         }
     }
 
+    /// Whether the running application has requested shift capture via XTSHIFTESCAPE (`CSI > 1 s`).
+    /// When `true`, shift+click is forwarded to the app instead of triggering local text selection.
+    public private(set) var mouseShiftCapture: Bool = false
+
     // The next four variables determine whether setting/querying should be done using utf8 or latin1
     // and whether the values should be set or queried using hex digits, rather than actual byte streams
     var xtermTitleSetUtf = false
@@ -894,7 +898,8 @@ open class Terminal {
         curAttr = CharData.defaultAttr
         
         mouseMode = .off
-        
+        mouseShiftCapture = false
+
         buffer.scrollTop = 0
         buffer.scrollBottom = rows-1
         buffer.marginLeft = 0
@@ -5694,6 +5699,19 @@ open class Terminal {
         }
     }
     
+    // XTSHIFTESCAPE (CSI > Ps s)
+    func cmdSetShiftEscape (_ pars: [Int]) {
+        let ps = pars.isEmpty ? 0 : pars[0]
+        switch ps {
+        case 0:
+            mouseShiftCapture = false
+        case 1:
+            mouseShiftCapture = true
+        default:
+            break
+        }
+    }
+
     /**
      * Encodes the button action in the format expected by the client
      * - Parameter button: The button to encode
