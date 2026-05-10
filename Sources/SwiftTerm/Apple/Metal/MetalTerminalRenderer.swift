@@ -1891,7 +1891,13 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
     private func colorToSIMD(_ color: TTColor) -> SIMD4<Float> {
         #if os(macOS)
-        let rgb = color.usingColorSpace(.deviceRGB) ?? color
+        // Pin to sRGB for parity with the CoreGraphics path's
+        // `usingColorSpace(.sRGB)` in MacExtensions.swift, and so the
+        // byte values written into the .bgra8Unorm drawable match the
+        // CAMetalLayer's sRGB-default color space. (.deviceRGB happens
+        // to resolve to identical values on macOS today, but pinning
+        // to sRGB makes the intent explicit.)
+        let rgb = color.usingColorSpace(.sRGB) ?? color
         var r: CGFloat = 0
         var g: CGFloat = 0
         var b: CGFloat = 0
