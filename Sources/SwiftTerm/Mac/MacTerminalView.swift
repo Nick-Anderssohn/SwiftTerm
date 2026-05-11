@@ -2353,8 +2353,156 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
     }
     
+    /// Sign of the user-driven phase of a trackpad scroll gesture.
+    /// `.up` corresponds to `event.scrollingDeltaY > 0` (revealing
+    /// earlier content); `.down` to `< 0`. Internal (not private)
+    /// so the unit tests for `shouldDropRubberBand` can drive it.
+    enum ScrollGestureDirection {
+        case up
+        case down
+
+        init?(deltaY: CGFloat) {
+            if deltaY > 0 { self = .up }
+            else if deltaY < 0 { self = .down }
+            else { return nil }
+        }
+    }
+
+    /// Direction latched on the first non-zero user-phase delta of
+    /// the current trackpad gesture. `nil` outside a gesture or
+    /// before any non-zero delta has arrived. Reset on `.began`,
+    /// on momentum `.ended`/`.cancelled`, and when the user
+    /// genuinely reverses direction mid-gesture.
+    private var scrollGestureDirection: ScrollGestureDirection?
+
+    /// Sub-line points accumulator for the alternate-screen
+    /// branch of `scrollWheel(with:)`. Precise-delta trackpad
+    /// events deposit `scrollingDeltaY` here; we emit one arrow
+    /// key per `cellHeight` of accumulated travel. Reset alongside
+    /// `scrollGestureDirection` on gesture boundaries.
+    private var altScreenScrollAccumulatorPx: CGFloat = 0
+
+    /// Pure gesture-state machine for filtering trackpad
+    /// rubber-band snap-back events. Mutates `latch` and
+    /// `accumulator` in place and returns whether the caller
+    /// should drop this event.
+    ///
+    /// Mouse-wheel events (both `phase` and `momentum` empty)
+    /// always pass through and never touch the latch.
+    ///
+    /// Trackpad / Magic Mouse gestures:
+    ///   - `.began` → reset latch and accumulator
+    ///   - user-driven `.changed`/`.stationary` → latch on first
+    ///     non-zero delta; on an in-gesture sign flip, re-latch
+    ///     and clear the accumulator
+    ///   - user-driven `.ended`/`.cancelled` → keep latch so the
+    ///     momentum tail can be filtered against it
+    ///   - momentum `.began`/`.changed` → drop deltas whose sign
+    ///     opposes the latch (rubber-band snap-back)
+    ///   - momentum `.ended`/`.cancelled` → reset latch and
+    ///     accumulator
+    ///
+    /// Static so unit tests can drive it without synthesizing
+    /// `NSEvent`s.
+    static func shouldDropRubberBand(
+        phase: NSEvent.Phase,
+        momentum: NSEvent.Phase,
+        deltaY: CGFloat,
+        latch: inout ScrollGestureDirection?,
+        accumulator: inout CGFloat
+    ) -> Bool {
+        if phase.isEmpty && momentum.isEmpty {
+            // Mouse wheel: no gesture, no latch to maintain.
+            return false
+        }
+        if phase.contains(.began) {
+            latch = nil
+            accumulator = 0
+        }
+        if phase.contains(.ended) || phase.contains(.cancelled) {
+            // User lifted; keep the latch so the momentum tail can
+            // be filtered against it. `.ended` frames carry a zero
+            // delta in practice.
+            return false
+        }
+        if momentum.contains(.ended) || momentum.contains(.cancelled) {
+            latch = nil
+            accumulator = 0
+            return false
+        }
+        if !momentum.isEmpty {
+            // Momentum frame.
+            guard let latched = latch else { return false }
+            guard let eventDir = ScrollGestureDirection(deltaY: deltaY) else {
+                // Zero-delta momentum frame contributes nothing.
+                return true
+            }
+            // Drop deltas pointing opposite to the user's direction
+            // — that's the rubber-band snap-back.
+            return eventDir != latched
+        }
+        // User-driven (`.changed` / `.stationary`, or `.began` that
+        // already carried a delta).
+        if let eventDir = ScrollGestureDirection(deltaY: deltaY) {
+            if let latched = latch, latched != eventDir {
+                // Genuine in-gesture reversal: re-latch and reset
+                // the alt-screen accumulator so leftover points
+                // from the old direction don't fire an opposite
+                // arrow key on the next emission.
+                latch = eventDir
+                accumulator = 0
+            } else if latch == nil {
+                latch = eventDir
+            }
+        }
+        return false
+    }
+
+    /// Thin instance wrapper that hands the per-view gesture
+    /// state to the pure helper.
+    private func shouldDropRubberBandScroll(_ event: NSEvent) -> Bool {
+        Self.shouldDropRubberBand(
+            phase: event.phase,
+            momentum: event.momentumPhase,
+            deltaY: event.scrollingDeltaY,
+            latch: &scrollGestureDirection,
+            accumulator: &altScreenScrollAccumulatorPx
+        )
+    }
+
+    /// Alternate-screen arrow-key emitter. Precise-delta trackpad
+    /// events accumulate `scrollingDeltaY` and emit one arrow per
+    /// `cellHeight` of travel; mouse wheels keep the upstream
+    /// velocity-quantized behavior. The accumulator is shared with
+    /// the gesture-filter helper, so both reset on the same phase
+    /// boundaries.
+    private func emitAlternateScreenArrowKeys(for event: NSEvent) {
+        if event.hasPreciseScrollingDeltas {
+            let cellHeight = cellDimension.height
+            guard cellHeight > 0 else { return }
+            altScreenScrollAccumulatorPx += event.scrollingDeltaY
+            var arrows = Int(altScreenScrollAccumulatorPx / cellHeight)
+            if arrows == 0 { return }
+            altScreenScrollAccumulatorPx -= CGFloat(arrows) * cellHeight
+            let up = arrows > 0
+            arrows = abs(arrows)
+            for _ in 0..<arrows {
+                if up { sendKeyUp() } else { sendKeyDown() }
+            }
+        } else {
+            // Mouse wheel: keep upstream velocity-quantized behavior.
+            let lines = calcScrollingVelocity(delta: Int(abs(event.deltaY)))
+            for _ in 0..<lines {
+                if event.deltaY > 0 { sendKeyUp() } else { sendKeyDown() }
+            }
+        }
+    }
+
     public override func scrollWheel(with event: NSEvent) {
         if event.deltaY == 0 && event.scrollingDeltaY == 0 {
+            return
+        }
+        if shouldDropRubberBandScroll(event) {
             return
         }
         if allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode != .off {
@@ -2369,14 +2517,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
             }
         } else if terminal.isDisplayBufferAlternate {
-            let lines = calcScrollingVelocity(delta: Int(abs(event.deltaY)))
-            for _ in 0..<lines {
-                if event.deltaY > 0 {
-                    sendKeyUp()
-                } else {
-                    sendKeyDown()
-                }
-            }
+            emitAlternateScreenArrowKeys(for: event)
         } else if smoothScrollingEnabled
                     && isUsingMetalRenderer
                     && event.hasPreciseScrollingDeltas {
@@ -2396,9 +2537,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             }
         }
     }
-    
+
     private func calcScrollingVelocity (delta: Int) -> Int
     {
+        // Zero-delta precise events would otherwise emit a phantom
+        // arrow key / scroll line via the `for _ in 0..<1` loops at
+        // every call site. All call sites tolerate a zero return.
+        if delta <= 0 {
+            return 0
+        }
         if delta > 9 {
             return max (terminal.rows, 20)
         }
