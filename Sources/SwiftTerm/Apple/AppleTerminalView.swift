@@ -95,10 +95,10 @@ extension TerminalView {
         set { _fontSmoothing = newValue }
     }
 
-    /// Controls the luminance-aware coverage curve applied in the Metal
-    /// grayscale text fragment shader. Defaults to `.appleApprox` on
-    /// macOS (Kitty's `1.7 30` parameters) so dark-on-light text reads
-    /// close to Apple Terminal's heavy stem-darkening; light-on-dark
+    /// Controls the luminance-aware coverage curve applied to grayscale text
+    /// on both the Metal and CoreGraphics render paths. Defaults to
+    /// `.appleApprox` on macOS (Kitty's `1.7 30` parameters) so dark-on-light
+    /// text reads close to Apple Terminal's heavy stem-darkening; light-on-dark
     /// stays close to identity. Set to `.identity` to disable, or
     /// `.custom(gamma:contrastPercent:)` to tune empirically. The
     /// renderer reads this lazily on the next frame; the setter
@@ -1313,6 +1313,19 @@ extension TerminalView {
     }
 
     
+    /// Resolves the background color a glyph run is drawn over, preferring the
+    /// selection highlight, then an explicit cell background, else `nil` (the
+    /// view's default `nativeBackgroundColor`). Shared by the background-fill
+    /// loop and the composition-curve luminance computation so both agree.
+    func resolvedBackgroundColor(for runAttributes: [NSAttributedString.Key: Any]) -> TTColor? {
+        if runAttributes.keys.contains(.selectionBackgroundColor) {
+            return runAttributes[.selectionBackgroundColor] as? TTColor
+        } else if runAttributes.keys.contains(.backgroundColor) {
+            return runAttributes[.backgroundColor] as? TTColor
+        }
+        return nil
+    }
+
     // TODO: this should not render any lines outside the dirtyRect
     func drawTerminalContents (dirtyRect: TTRect, context: CGContext, bufferOffset: Int)
     {
@@ -1470,12 +1483,7 @@ extension TerminalView {
                     let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
                     let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
                     let endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
-                    var backgroundColor: TTColor?
-                    if runAttributes.keys.contains(.selectionBackgroundColor) {
-                        backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
-                    } else if runAttributes.keys.contains(.backgroundColor) {
-                        backgroundColor = runAttributes[.backgroundColor] as? TTColor
-                    }
+                    let backgroundColor = resolvedBackgroundColor(for: runAttributes)
 
                     if let backgroundColor = backgroundColor {
                         let columnSpan = max(0, endColumn - startColumn)
@@ -1541,6 +1549,19 @@ extension TerminalView {
             #if os(macOS)
             context.setShouldSmoothFonts(fontSmoothing)
             context.setAllowsFontSmoothing(fontSmoothing)
+            // Reproduce the Metal text-composition curve on this software path so
+            // glyph weight matches the hardware-accelerated renderer. The
+            // compositor caches LUTs / scratch buffers across the runs below; the
+            // detector caches color-font checks. Both are nil/unused for the
+            // `.identity` strategy (iOS / opt-out), which draws glyphs directly.
+            let compositionStrategy = terminal.options.textCompositionStrategy
+            let compositor: TextCompositionCompositor? = compositionStrategy == .identity
+                ? nil
+                : TextCompositionCompositor(
+                    params: TextCompositionCurve.params(for: compositionStrategy),
+                    scale: window?.backingScaleFactor ?? 2,
+                    fontSmoothing: fontSmoothing)
+            var colorFontDetector = ColorFontDetector()
             #endif
 
             // Glyph drawing loop — reuses cached CTLines
@@ -1572,14 +1593,23 @@ extension TerminalView {
                             y: lineOrigin.y + yOffset + ctPosition.y)
                     }
 
-                    nativeForegroundColor.setFill()
+                    let fgColor = (runAttributes[.foregroundColor] as? TTColor) ?? nativeForegroundColor
+                    fgColor.setFill()
 
-                    if runAttributes.keys.contains(.foregroundColor) {
-                        let color = runAttributes[.foregroundColor] as! TTColor
-                        color.setFill()
+                    #if os(macOS)
+                    // Apply the composition curve unless it's disabled (no
+                    // compositor) or this is a color/emoji run (drawn normally,
+                    // matching the Metal path's separate color shader).
+                    if let compositor, !colorFontDetector.isColorFont(runFont) {
+                        let bgColor = resolvedBackgroundColor(for: runAttributes) ?? nativeBackgroundColor
+                        compositor.draw(glyphs: runGlyphs, positions: positions, font: runFont as CTFont,
+                                        foreground: fgColor, background: bgColor, in: context)
+                    } else {
+                        CTFontDrawGlyphs(runFont, runGlyphs, &positions, positions.count, context)
                     }
-
+                    #else
                     CTFontDrawGlyphs(runFont, runGlyphs, &positions, positions.count, context)
+                    #endif
 
                     // Draw other attributes
                     drawRunAttributes(runAttributes, glyphPositions: positions, in: context)

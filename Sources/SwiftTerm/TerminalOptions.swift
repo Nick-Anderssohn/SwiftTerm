@@ -38,14 +38,17 @@ public enum CursorStyle {
     }
 }
 
-/// Luminance-aware glyph coverage strategy applied in the Metal grayscale text
-/// fragment shader. Mirrors the input pair of Kitty's
-/// `text_composition_strategy` config option (see
+/// Luminance-aware glyph coverage strategy applied to grayscale text on both
+/// render paths — the Metal grayscale fragment shader and the CoreGraphics
+/// software path (which reproduces it via an offscreen coverage pass; see
+/// `TextCompositionCurve` / `TextCompositionCompositor`). Mirrors the input
+/// pair of Kitty's `text_composition_strategy` config option (see
 /// `kitty/cell_fragment.glsl`): a per-cell mix of identity coverage and
 /// `pow(coverage, 1/gamma)`, weighted by `(1 - L_fg + L_bg) * 0.5` so that
 /// dark-on-light text gets thickened toward Apple Terminal's heavy
-/// dilation while light-on-dark text is barely touched. Color emoji are
-/// not affected — they go through a separate fragment shader.
+/// dilation while light-on-dark text is barely touched. Color emoji are not
+/// affected — the Metal path routes them through a separate fragment shader,
+/// the CoreGraphics path skips them via `ColorFontDetector`.
 public enum TextCompositionStrategy: Sendable, Hashable {
     /// Disable the curve. Glyph alpha goes to the framebuffer as
     /// rasterized. iOS / non-macOS default.
@@ -113,11 +116,12 @@ public struct TerminalOptions {
     /// a view whose initial layout is briefly tiny (e.g. a sidebar terminal that
     /// resolves geometry over a few frames after spawn).
     public var reflowCursorLine: Bool
-    /// Coverage-curve strategy applied in the Metal grayscale text fragment
-    /// shader. macOS defaults to `.appleApprox` (Kitty's `1.7 30`
-    /// parameters) so dark-on-light text reads close to Apple Terminal's
-    /// heavy dilation; other platforms default to `.identity`. Has no
-    /// effect when the Metal renderer is not in use.
+    /// Coverage-curve strategy applied to grayscale text in both the Metal
+    /// grayscale fragment shader and the CoreGraphics software draw path (which
+    /// reproduces it via an offscreen coverage pass). macOS defaults to
+    /// `.appleApprox` (Kitty's `1.7 30` parameters) so dark-on-light text reads
+    /// close to Apple Terminal's heavy dilation; other platforms default to
+    /// `.identity`.
     public var textCompositionStrategy: TextCompositionStrategy
 
     /// Per-platform default for `textCompositionStrategy`. macOS gets

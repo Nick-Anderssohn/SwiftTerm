@@ -2084,17 +2084,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         } else {
             strategy = TerminalOptions.defaultTextCompositionStrategy
         }
-        switch strategy {
-        case .identity:
-            return SIMD2<Float>(1.0, 1.0)
-        case .appleApprox:
-            // Kitty's macOS defaults: text_gamma_adjustment=1.7,
-            // text_contrast=30 → shader sees (1/1.7, 1+0.30).
-            return SIMD2<Float>(1.0 / 1.7, 1.30)
-        case .custom(let gamma, let contrastPercent):
-            let safeGamma = gamma > 0 ? gamma : 1.0
-            return SIMD2<Float>(1.0 / safeGamma, 1.0 + contrastPercent * 0.01)
-        }
+        // Single source of truth for the curve parameters, shared with the
+        // CoreGraphics path (`TextCompositionCurve.params`) so the two renderers
+        // can't drift. Kitty's macOS defaults (text_gamma_adjustment=1.7,
+        // text_contrast=30) resolve to (1/1.7, 1.30) there.
+        let p = TextCompositionCurve.params(for: strategy)
+        return SIMD2<Float>(p.gammaInv, p.contrast)
     }
 
     /// Compute the scrollOffset uniform (in y-up pixels) that aligns
