@@ -1036,7 +1036,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 }
             }
 
-            if eventFlags.contains(.control) || (optionAsMetaKey && eventFlags.contains(.option)) {
+            if eventFlags.contains(.control)
+                || eventFlags.contains(.command)
+                || (optionAsMetaKey && eventFlags.contains(.option)) {
                 if let kittyEvent = kittyTextEvent(from: event, eventType: repeatEventType),
                    sendKittyEvent(kittyEvent) {
                     return
@@ -1145,8 +1147,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public override func keyUp(with event: NSEvent) {
         let flags = terminal.keyboardEnhancementFlags
         if flags.contains(.reportEvents) {
-            let hasAltOrCtrl = event.modifierFlags.contains(.control) || (optionAsMetaKey && event.modifierFlags.contains(.option))
-            let shouldHandle = flags.contains(.reportAllKeys) || hasAltOrCtrl || kittyFunctionalKey(from: event) != nil
+            let hasModifier = event.modifierFlags.contains(.control)
+                || event.modifierFlags.contains(.command)
+                || (optionAsMetaKey && event.modifierFlags.contains(.option))
+            let shouldHandle = flags.contains(.reportAllKeys) || hasModifier || kittyFunctionalKey(from: event) != nil
             if shouldHandle, let kittyEvent = kittyKeyEvent(from: event, eventType: .release, text: nil) {
                 if !flags.contains(.reportAllKeys),
                    case .unicode(let codepoint) = kittyEvent.key,

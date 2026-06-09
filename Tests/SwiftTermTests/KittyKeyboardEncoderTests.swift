@@ -50,6 +50,46 @@ final class KittyKeyboardEncoderTests: XCTestCase {
         assertEncode(event, flags: [.disambiguate], expected: "a")
     }
 
+    // Cmd+C must be reported as a CSI-u sequence so apps that enable the
+    // kitty protocol (e.g. Claude Code in fullscreen) receive it. The
+    // super modifier encodes as 8, reported as 8+1 = 9. `keyDown` routes
+    // Command keys through `kittyTextEvent`, which builds the event with
+    // `text: nil`, so the super modifier never leaks as plain text.
+    func testSuperModifiedKeyWithDisambiguate() {
+        let event = KittyKeyEvent(key: .unicode(99),
+                                  modifiers: [.super],
+                                  eventType: .press,
+                                  text: nil,
+                                  shiftedKey: nil,
+                                  baseLayoutKey: nil)
+        assertEncode(event, flags: [.disambiguate], expected: "\u{1b}[99;9u")
+    }
+
+    // Shift+Super combines to 1 + 8 = 9, reported as 9+1 = 10.
+    func testSuperShiftModifiedKeyWithDisambiguate() {
+        let event = KittyKeyEvent(key: .unicode(99),
+                                  modifiers: [.super, .shift],
+                                  eventType: .press,
+                                  text: nil,
+                                  shiftedKey: nil,
+                                  baseLayoutKey: nil)
+        assertEncode(event, flags: [.disambiguate], expected: "\u{1b}[99;10u")
+    }
+
+    // report-all-keys + report-text must not turn Cmd+C into plain text:
+    // the super modifier prevents associated text, so it stays CSI-u.
+    func testSuperModifiedKeyWithReportAllKeys() {
+        let event = KittyKeyEvent(key: .unicode(99),
+                                  modifiers: [.super],
+                                  eventType: .press,
+                                  text: nil,
+                                  shiftedKey: nil,
+                                  baseLayoutKey: nil)
+        assertEncode(event,
+                     flags: [.disambiguate, .reportAllKeys, .reportText],
+                     expected: "\u{1b}[99;9u")
+    }
+
     func testEnterBackspaceTabWithDisambiguate() {
         assertEncode(KittyKeyEvent(key: .functional(.enter),
                                    modifiers: [],
